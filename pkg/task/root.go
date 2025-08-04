@@ -30,7 +30,7 @@ func (o *OSSignal) Tick(any) {
 }
 
 type RootManager[K comparable, T ManagerItem[K]] struct {
-	Manager[K, T]
+	WorkCollection[K, T]
 }
 
 func (m *RootManager[K, T]) Init() {

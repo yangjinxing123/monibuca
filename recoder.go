@@ -85,7 +85,7 @@ func (r *DefaultRecorder) CreateStream(start time.Time, customFileName func(*Rec
 	if sub.Publisher.HasVideoTrack() {
 		r.Event.VideoCodec = sub.Publisher.VideoTrack.ICodecCtx.String()
 	}
-	if recordJob.Plugin.DB != nil {
+	if recordJob.Plugin.DB != nil && recordJob.RecConf.Mode != config.RecordModeTest {
 		if recordJob.Event != nil {
 			r.Event.RecordEvent = recordJob.Event
 			r.Event.RecordLevel = recordJob.Event.EventLevel
@@ -100,7 +100,7 @@ func (r *DefaultRecorder) CreateStream(start time.Time, customFileName func(*Rec
 
 func (r *DefaultRecorder) WriteTail(end time.Time, tailJob task.IJob) {
 	r.Event.EndTime = end
-	if r.RecordJob.Plugin.DB != nil {
+	if r.RecordJob.Plugin.DB != nil && r.RecordJob.RecConf.Mode != config.RecordModeTest {
 		// 将事件和录像记录关联
 		if r.RecordJob.Event != nil {
 			r.RecordJob.Plugin.DB.Save(&r.Event)
@@ -108,11 +108,11 @@ func (r *DefaultRecorder) WriteTail(end time.Time, tailJob task.IJob) {
 		} else {
 			r.RecordJob.Plugin.DB.Save(&r.Event.RecordStream)
 		}
+		if tailJob == nil {
+			return
+		}
+		tailJob.AddTask(NewEventRecordCheck(r.Event.Type, r.Event.StreamPath, r.RecordJob.Plugin.DB))
 	}
-	if tailJob == nil {
-		return
-	}
-	tailJob.AddTask(NewEventRecordCheck(r.Event.Type, r.Event.StreamPath, r.RecordJob.Plugin.DB))
 }
 
 func (p *RecordJob) GetKey() string {
@@ -170,7 +170,7 @@ func (p *RecordJob) Init(recorder IRecorder, plugin *Plugin, streamPath string, 
 		})
 	}
 
-	plugin.Server.Records.Add(p, plugin.Logger.With("filePath", conf.FilePath, "streamPath", streamPath))
+	plugin.Server.Records.AddTask(p, plugin.Logger.With("filePath", conf.FilePath, "streamPath", streamPath))
 	return p
 }
 

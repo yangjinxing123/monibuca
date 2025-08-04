@@ -4,15 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/url"
 	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
-
-	"m7s.live/v5/pkg/config"
 
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
@@ -22,6 +19,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"m7s.live/v5/plugin/gb28181/pb"
 	gb28181 "m7s.live/v5/plugin/gb28181/pkg"
+	mrtp "m7s.live/v5/plugin/rtp/pkg"
 )
 
 func (gb *GB28181Plugin) List(ctx context.Context, req *pb.GetDevicesRequest) (*pb.DevicesPageInfo, error) {
@@ -129,7 +127,7 @@ func (gb *GB28181Plugin) List(ctx context.Context, req *pb.GetDevicesRequest) (*
 			MediaIp:       d.MediaIp,
 			SipIp:         d.SipIp,
 			Password:      d.Password,
-			StreamMode:    d.StreamMode,
+			StreamMode:    string(d.StreamMode),
 		})
 	}
 
@@ -138,25 +136,6 @@ func (gb *GB28181Plugin) List(ctx context.Context, req *pb.GetDevicesRequest) (*
 	resp.Data = pbDevices
 
 	return resp, nil
-}
-
-func (gb *GB28181Plugin) api_ps_replay(w http.ResponseWriter, r *http.Request) {
-	dump := r.URL.Query().Get("dump")
-	streamPath := r.PathValue("streamPath")
-	if dump == "" {
-		dump = "dump/ps"
-	}
-	if streamPath == "" {
-		if strings.HasPrefix(dump, "/") {
-			streamPath = "replay" + dump
-		} else {
-			streamPath = "replay/" + dump
-		}
-	}
-	var puller gb28181.DumpPuller
-	puller.GetPullJob().Init(&puller, &gb.Plugin, streamPath, config.Pull{
-		URL: dump,
-	}, nil)
 }
 
 // GetDevice 实现获取单个设备信息
@@ -209,7 +188,7 @@ func (gb *GB28181Plugin) GetDevice(ctx context.Context, req *pb.GetDeviceRequest
 			MediaIp:      d.MediaIp,
 			SipIp:        d.SipIp,
 			Password:     d.Password,
-			StreamMode:   d.StreamMode,
+			StreamMode:   string(d.StreamMode),
 		}
 		resp.Code = 0
 		resp.Message = "success"
@@ -302,7 +281,7 @@ func (gb *GB28181Plugin) GetDevices(ctx context.Context, req *pb.GetDevicesReque
 			MediaIp:       d.MediaIp,
 			SipIp:         d.SipIp,
 			Password:      d.Password,
-			StreamMode:    d.StreamMode,
+			StreamMode:    string(d.StreamMode),
 		}
 		pbDevices = append(pbDevices, pbDevice)
 	}
@@ -536,7 +515,7 @@ func (gb *GB28181Plugin) UpdateDevice(ctx context.Context, req *pb.Device) (*pb.
 			}
 		}
 		if req.StreamMode != "" {
-			d.StreamMode = req.StreamMode
+			d.StreamMode = mrtp.StreamMode(req.StreamMode)
 		}
 		if req.Password != "" {
 			d.Password = req.Password
@@ -1908,7 +1887,7 @@ func (gb *GB28181Plugin) GetGroupChannels(ctx context.Context, req *pb.GetGroupC
 
 		// 从内存中获取设备信息以获取传输协议
 		if device, ok := gb.devices.Get(channel.DeviceId); ok {
-			channelInfo.StreamMode = device.StreamMode
+			channelInfo.StreamMode = string(device.StreamMode)
 		}
 
 		results = append(results, channelInfo)
@@ -2087,7 +2066,7 @@ func (gb *GB28181Plugin) getGroupChannels(groupId int32) ([]*pb.GroupChannel, er
 			// 从内存中获取设备信息
 			if device, ok := gb.devices.Get(relation.DeviceID); ok {
 				channelInfo.DeviceName = device.Name
-				channelInfo.StreamMode = device.StreamMode
+				channelInfo.StreamMode = string(device.StreamMode)
 			}
 
 			pbGroupChannels = append(pbGroupChannels, channelInfo)
@@ -2864,53 +2843,6 @@ func (gb *GB28181Plugin) RemoveDevice(ctx context.Context, req *pb.RemoveDeviceR
 		resp.Message = "设备删除成功"
 	}
 
-	return resp, nil
-}
-
-func (gb *GB28181Plugin) OpenRTPServer(ctx context.Context, req *pb.OpenRTPServerRequest) (*pb.OpenRTPServerResponse, error) {
-	resp := &pb.OpenRTPServerResponse{}
-	var pub *gb28181.PSPublisher
-	// 获取媒体信息
-	mediaPort := uint16(req.Port)
-	if mediaPort == 0 {
-		if req.Udp {
-			// TODO: udp sppport
-			resp.Code = 501
-			return resp, fmt.Errorf("udp not supported")
-		}
-		if gb.MediaPort.Valid() {
-			select {
-			case mediaPort = <-gb.tcpPorts:
-				defer func() {
-					if pub != nil {
-						pub.Receiver.OnDispose(func() {
-							gb.tcpPorts <- mediaPort
-						})
-					}
-				}()
-			default:
-				resp.Code = 500
-				resp.Message = "没有可用的媒体端口"
-				return resp, fmt.Errorf("没有可用的媒体端口")
-			}
-		} else {
-			mediaPort = gb.MediaPort[0]
-		}
-	}
-	publisher, err := gb.Publish(gb, req.StreamPath)
-	if err != nil {
-		resp.Code = 500
-		resp.Message = fmt.Sprintf("发布失败: %v", err)
-		return resp, err
-	}
-	pub = gb28181.NewPSPublisher(publisher)
-	pub.Receiver.ListenAddr = fmt.Sprintf(":%d", mediaPort)
-	pub.Receiver.StreamMode = "TCP-PASSIVE"
-	gb.AddTask(&pub.Receiver)
-	go pub.Demux()
-	resp.Code = 0
-	resp.Data = int32(mediaPort)
-	resp.Message = "success"
 	return resp, nil
 }
 

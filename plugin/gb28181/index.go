@@ -24,6 +24,7 @@ import (
 	"m7s.live/v5/pkg/util"
 	"m7s.live/v5/plugin/gb28181/pb"
 	gb28181 "m7s.live/v5/plugin/gb28181/pkg"
+	mrtp "m7s.live/v5/plugin/rtp/pkg"
 )
 
 type SipConfig struct {
@@ -71,7 +72,7 @@ var _ = m7s.InstallPlugin[GB28181Plugin](m7s.PluginMeta{
 	ServiceDesc:         &pb.Api_ServiceDesc,
 	NewPuller: func(conf config.Pull) m7s.IPuller {
 		if util.Exist(conf.URL) {
-			return &gb28181.DumpPuller{}
+			return &mrtp.DumpPuller{}
 		}
 		return new(Dialog)
 	},
@@ -146,7 +147,7 @@ func (gb *GB28181Plugin) initDatabase() error {
 	return nil
 }
 
-func (gb *GB28181Plugin) OnInit() (err error) {
+func (gb *GB28181Plugin) Start() (err error) {
 	if gb.DB == nil {
 		return pkg.ErrNoDB
 	}
@@ -344,7 +345,7 @@ func (gb *GB28181Plugin) checkDeviceExpire() (err error) {
 		}
 		device.Task.ID = hash
 		device.channels.OnAdd(func(c *Channel) {
-			if absDevice, ok := gb.Server.PullProxies.SafeFind(func(absDevice m7s.IPullProxy) bool {
+			if absDevice, ok := gb.Server.PullProxies.Find(func(absDevice m7s.IPullProxy) bool {
 				conf := absDevice.GetConfig()
 				return conf.Type == "gb28181" && conf.URL == fmt.Sprintf("%s/%s", device.DeviceId, c.ChannelId)
 			}); ok {
@@ -475,12 +476,6 @@ func (gb *GB28181Plugin) checkPlatform() {
 			gb.platforms.Add(platform)
 			gb.Info("平台初始化完成", "ID", platformModel.ServerGBID, "Name", platformModel.Name)
 		}
-	}
-}
-
-func (gb *GB28181Plugin) RegisterHandler() map[string]http.HandlerFunc {
-	return map[string]http.HandlerFunc{
-		"/api/ps/replay/{streamPath...}": gb.api_ps_replay,
 	}
 }
 
@@ -692,7 +687,7 @@ func (gb *GB28181Plugin) OnNotify(req *sip.Request, tx sip.ServerTransaction) {
 
 func (gb *GB28181Plugin) Pull(streamPath string, conf config.Pull, pubConf *config.Publish) (job *m7s.PullJob, err error) {
 	if util.Exist(conf.URL) {
-		var puller gb28181.DumpPuller
+		var puller mrtp.DumpPuller
 		job = puller.GetPullJob()
 		job.Init(&puller, &gb.Plugin, streamPath, conf, pubConf)
 		return
@@ -944,52 +939,27 @@ func (gb *GB28181Plugin) OnInvite(req *sip.Request, tx sip.ServerTransaction) {
 	// 创建并保存SendRtpInfo，以供OnAck方法使用
 	forwardDialog := &ForwardDialog{
 		gb:             gb,
-		platformIP:     inviteInfo.IP,
-		platformPort:   inviteInfo.Port,
-		platformSSRC:   inviteInfo.SSRC,
-		TCP:            inviteInfo.TCP,
-		TCPActive:      inviteInfo.TCPActive,
 		platformCallId: req.CallID().Value(),
+		platformSSRC:   inviteInfo.SSRC,
 		start:          inviteInfo.StartTime,
 		end:            inviteInfo.StopTime,
 		channel:        channelTmp,
-		upIP:           inviteInfo.IP,
-		upPort:         mediaPort,
-	}
-	forwardDialog.forwarder = gb28181.NewRTPForwarder()
-	forwardDialog.forwarder.TCP = forwardDialog.TCP
-	forwardDialog.forwarder.TCPActive = forwardDialog.TCPActive
-	forwardDialog.forwarder.StreamMode = forwardDialog.channel.Device.StreamMode
-
-	if forwardDialog.TCPActive {
-		forwardDialog.forwarder.UpListenAddr = fmt.Sprintf(":%d", forwardDialog.upPort)
-	} else {
-		forwardDialog.forwarder.UpListenAddr = fmt.Sprintf("%s:%d", forwardDialog.upIP, forwardDialog.platformPort)
-	}
-
-	// 设置监听地址和端口
-	if strings.ToUpper(forwardDialog.channel.Device.StreamMode) == "TCP-ACTIVE" {
-		forwardDialog.forwarder.DownListenAddr = fmt.Sprintf("%s:%d", forwardDialog.downIP, forwardDialog.downPort)
-	} else {
-		forwardDialog.forwarder.DownListenAddr = fmt.Sprintf(":%d", forwardDialog.MediaPort)
-	}
-
-	// 设置转发目标
-	if inviteInfo.IP != "" && forwardDialog.platformPort > 0 {
-		err = forwardDialog.forwarder.SetTarget(forwardDialog.platformIP, forwardDialog.platformPort)
-		if err != nil {
-			gb.Error("set target error", "err", err)
-			return
-		}
-	} else {
-		gb.Error("no target set, will only receive but not forward")
-		return
-	}
-
-	// 设置目标SSRC
-	if forwardDialog.platformSSRC != "" {
-		forwardDialog.forwarder.TargetSSRC = forwardDialog.platformSSRC
-		gb.Info("set target ssrc", "ssrc", forwardDialog.platformSSRC)
+		// 初始化 ForwardConfig
+		ForwardConfig: mrtp.ForwardConfig{
+			Source: mrtp.ConnectionConfig{
+				IP:   "",                 // 将在 Run 方法中从 SDP 响应中获取
+				Port: 0,                  // 将在 Run 方法中从 SDP 响应中获取
+				Mode: mrtp.StreamModeUDP, // 默认值，将在 Run 方法中根据 StreamMode 更新
+				SSRC: 0,                  // 将在 Start 方法中设置
+			},
+			Target: mrtp.ConnectionConfig{
+				IP:   inviteInfo.IP,
+				Port: uint32(inviteInfo.Port),
+				Mode: mrtp.StreamModeUDP, // 默认值，将在 Run 方法中根据 StreamMode 更新
+				SSRC: 0,                  // 将在 Run 方法中从 platformSSRC 解析
+			},
+			Relay: false,
+		},
 	}
 	// 保存到集合中
 	gb.forwardDialogs.Set(forwardDialog)

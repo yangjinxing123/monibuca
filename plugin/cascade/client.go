@@ -22,7 +22,9 @@ type CascadeClientPlugin struct {
 	conn     quic.Connection
 }
 
-var _ = m7s.InstallPlugin[CascadeClientPlugin]()
+var _ = m7s.InstallPlugin[CascadeClientPlugin](m7s.PluginMeta{
+	NewPuller: cascade.NewCascadePuller,
+})
 
 type CascadeClient struct {
 	task.Work
@@ -79,7 +81,7 @@ func (task *CascadeClient) Run() (err error) {
 	return
 }
 
-func (c *CascadeClientPlugin) OnInit() (err error) {
+func (c *CascadeClientPlugin) Start() (err error) {
 	if c.Secret == "" && c.Server == "" {
 		return nil
 	}

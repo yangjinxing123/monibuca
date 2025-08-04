@@ -4,14 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"sync"
 	"time"
 
-	"m7s.live/v5/pkg"
 	"m7s.live/v5/pkg/codec"
 	"m7s.live/v5/pkg/task"
 
@@ -114,8 +111,14 @@ type Publisher struct {
 	OnSeek                 func(time.Time)
 	OnGetPosition          func() time.Time
 	PullProxyConfig        *PullProxyConfig
-	dumpFile               *os.File
 	dropAfterTs            time.Duration
+}
+
+type PublishParam struct {
+	Context      context.Context
+	Audio, Video IAVFrame
+	StreamPath   string
+	Config       *config.Publish
 }
 
 func (p *Publisher) SubscriberRange(yield func(sub *Subscriber) bool) {
@@ -124,18 +127,6 @@ func (p *Publisher) SubscriberRange(yield func(sub *Subscriber) bool) {
 
 func (p *Publisher) GetKey() string {
 	return p.StreamPath
-}
-
-// createPublisher -> Start -> WriteAudio/WriteVideo -> Dispose
-func createPublisher(p *Plugin, streamPath string, conf config.Publish) (publisher *Publisher) {
-	publisher = &Publisher{Publish: conf}
-	publisher.Type = conf.PubType
-	publisher.ID = task.GetNextTaskID()
-	publisher.Plugin = p
-	publisher.TimeoutTimer = time.NewTimer(p.config.PublishTimeout)
-	publisher.Logger = p.Logger.With("streamPath", streamPath, "pId", publisher.ID)
-	publisher.Init(streamPath, &publisher.Publish)
-	return
 }
 
 func (p *Publisher) Start() (err error) {
@@ -161,20 +152,11 @@ func (p *Publisher) Start() (err error) {
 	if !p.PubVideo {
 		p.videoReady.Reject(ErrMuted)
 	}
-	if p.Dump {
-		f := filepath.Join("./dump", p.StreamPath)
-		os.MkdirAll(filepath.Dir(f), 0666)
-		p.dumpFile, _ = os.OpenFile(filepath.Join("./dump", p.StreamPath), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
-	}
-
 	s.Waiting.WakeUp(p.StreamPath, p)
 	p.processAliasOnStart()
 	p.Plugin.Server.OnPublish(p)
 	//s.Transforms.PublishEvent <- p
 	p.AddTask(&PublishTimeout{Publisher: p})
-	if p.PublishTimeout > 0 {
-		p.AddTask(&PublishNoDataTimeout{Publisher: p})
-	}
 	return
 }
 
@@ -226,13 +208,19 @@ func (p *PublishNoDataTimeout) Tick(any) {
 	if p.Publisher.Paused != nil {
 		return
 	}
-	if p.Publisher.VideoTrack.CheckTimeout(p.Publisher.PublishTimeout) {
+	if p.Publisher.PubVideo && p.Publisher.VideoTrack.CheckTimeout(p.Publisher.PublishTimeout) {
 		p.Error("video timeout", "writeTime", p.Publisher.VideoTrack.LastValue.WriteTime)
-		p.Publisher.Stop(ErrPublishTimeout)
+		if !p.Publisher.HasAudioTrack() {
+			p.Publisher.Stop(ErrPublishTimeout)
+		}
+		p.Publisher.NoVideo()
 	}
-	if p.Publisher.AudioTrack.CheckTimeout(p.Publisher.PublishTimeout) {
+	if p.Publisher.PubAudio && p.Publisher.AudioTrack.CheckTimeout(p.Publisher.PublishTimeout) {
 		p.Error("audio timeout", "writeTime", p.Publisher.AudioTrack.LastValue.WriteTime)
-		p.Publisher.Stop(ErrPublishTimeout)
+		if !p.Publisher.HasVideoTrack() {
+			p.Publisher.Stop(ErrPublishTimeout)
+		}
+		p.Publisher.NoAudio()
 	}
 }
 
@@ -289,93 +277,138 @@ func (p *Publisher) AddSubscriber(subscriber *Subscriber) {
 	}
 }
 
-func (p *Publisher) fixTimestamp(t *AVTrack, data IAVFrame) {
-	frame := &t.Value
-	ts := data.GetTimestamp()
-	frame.CTS = data.GetCTS()
-	bytesIn := data.GetSize()
-	t.AddBytesIn(bytesIn)
-	frame.Timestamp = t.Tame(ts, t.FPS, p.Scale)
-}
-
-func (p *Publisher) writeAV(t *AVTrack, data IAVFrame) {
-	t.AcceptFrame(data)
+func (p *Publisher) writeAV(t *AVTrack, avFrame *AVFrame, codecCtxChanged bool, tracks *AVTracks) (err error) {
+	t.AcceptFrame()
 	if p.TraceEnabled() {
 		frame := &t.Value
 		codec := t.FourCC().String()
-		p.Trace("write", "seq", frame.Sequence, "baseTs", int32(t.BaseTs/time.Millisecond), "ts0", uint32(data.GetTimestamp()/time.Millisecond), "ts", uint32(frame.Timestamp/time.Millisecond), "codec", codec, "size", data.GetSize(), "data", data.String())
+		p.Trace("write", "seq", frame.Sequence, "baseTs", int32(t.BaseTs/time.Millisecond), "ts0", uint32(avFrame.TS0/time.Millisecond), "ts", uint32(frame.Timestamp/time.Millisecond), "codec", codec, "size", frame.Size, "data", frame.Wraps[0].String())
 	}
+	// 处理子轨道
+	if tracks.Length > 1 && tracks.IsReady() {
+		for i, track := range tracks.Items[1:] {
+			if track.ICodecCtx == nil {
+				// 为新的子轨道初始化历史帧
+				if tracks == &p.VideoTrack {
+					// 视频轨道使用 IDRingList
+					if t.IDRingList.Len() > 0 {
+						for rf := t.IDRingList.Front().Value; rf != t.Ring; rf = rf.Next() {
+							toFrame := track.NewFrame(&rf.Value)
+							toSample := toFrame.GetSample()
+							if track.ICodecCtx != nil {
+								toSample.ICodecCtx = track.ICodecCtx
+							}
+							err = ConvertFrameType(rf.Value.Wraps[0], toFrame)
+							if err != nil {
+								track.ICodecCtx = nil
+								return
+							}
+							track.ICodecCtx = toSample.ICodecCtx
+							if track.ICodecCtx == nil {
+								return ErrUnsupportCodec
+							}
+							rf.Value.Wraps = append(rf.Value.Wraps, toFrame)
+						}
+					}
+				} else {
+					// 音频轨道使用 GetOldestIDR
+					if idr := tracks.GetOldestIDR(); idr != nil {
+						for rf := idr; rf != t.Ring; rf = rf.Next() {
+							toFrame := track.NewFrame(&rf.Value)
+							toSample := toFrame.GetSample()
+							if track.ICodecCtx != nil {
+								toSample.ICodecCtx = track.ICodecCtx
+							}
+							err = ConvertFrameType(rf.Value.Wraps[0], toFrame)
+							if err != nil {
+								track.ICodecCtx = nil
+								return
+							}
+							track.ICodecCtx = toSample.ICodecCtx
+							if track.ICodecCtx == nil {
+								return ErrUnsupportCodec
+							}
+							rf.Value.Wraps = append(rf.Value.Wraps, toFrame)
+						}
+					}
+				}
+			}
+
+			// 处理当前帧的转换
+			var toFrame IAVFrame
+			if len(avFrame.Wraps) > i+1 {
+				toFrame = avFrame.Wraps[i+1]
+			} else {
+				toFrame = track.NewFrame(avFrame)
+				avFrame.Wraps = append(avFrame.Wraps, toFrame)
+			}
+			toSample := toFrame.GetSample()
+			if codecCtxChanged {
+				track.ICodecCtx = nil
+			} else {
+				toSample.ICodecCtx = track.ICodecCtx
+			}
+			err = ConvertFrameType(avFrame.Wraps[0], toFrame)
+			track.ICodecCtx = toSample.ICodecCtx
+			if track.ICodecCtx != nil {
+				track.Ready(err)
+			}
+		}
+	}
+	t.Step()
+	return
 }
 
-func (p *Publisher) trackAdded() error {
+func (p *Publisher) trackAdded() {
+	if p.State == PublisherStateInit && p.PublishTimeout > 0 {
+		p.AddTask(&PublishNoDataTimeout{Publisher: p})
+	}
 	if p.Subscribers.Length > 0 {
 		p.State = PublisherStateSubscribed
 	} else {
 		p.State = PublisherStateTrackAdded
 	}
-	return nil
 }
 
-func (p *Publisher) SetCodecCtx(ctx codec.ICodecCtx, data IAVFrame) {
-	if _, ok := ctx.(IAudioCodecCtx); ok {
-		t := p.AudioTrack.AVTrack
-		if t == nil {
-			t = NewAVTrack(data, p.Logger.With("track", "audio"), &p.Publish, p.audioReady)
-			p.AudioTrack.Set(t)
-			p.Call(p.trackAdded)
-		}
-		t.ICodecCtx = ctx
-		return
-	} else if _, ok := ctx.(IVideoCodecCtx); ok {
-		t := p.VideoTrack.AVTrack
-		if t == nil {
-			t = NewAVTrack(data, p.Logger.With("track", "video"), &p.Publish, p.videoReady)
-			p.VideoTrack.Set(t)
-			p.Call(p.trackAdded)
-		}
-		t.ICodecCtx = ctx
+func (p *Publisher) checkCodecChange(t *AVTrack) (codecCtxChanged bool, err error) {
+	avFrame := &t.Value
+	if t.Allocator == nil {
+		t.Allocator = avFrame.GetAllocator()
+	}
+	err = avFrame.Wraps[0].CheckCodecChange()
+	if err != nil {
 		return
 	}
+	if avFrame.ICodecCtx == nil {
+		err = ErrUnsupportCodec
+		return
+	}
+	oldCodecCtx := t.ICodecCtx
+	t.ICodecCtx = avFrame.ICodecCtx
+	avFrame.TS0 = avFrame.Timestamp
+	t.FixTimestamp(avFrame.Sample, p.Scale)
+	codecCtxChanged = oldCodecCtx != t.ICodecCtx
+	return
 }
 
-func (p *Publisher) WriteVideo(data IAVFrame) (err error) {
+func (p *Publisher) nextVideo() (err error) {
+	t := p.VideoTrack.AVTrack
 	defer func() {
-		if err != nil {
-			data.Recycle()
-			if err == ErrSkip {
-				err = nil
-			}
+		if err == nil {
+			t.SpeedControl(p.Speed)
+		} else if t != nil {
+			t.Value.Reset()
 		}
 	}()
 	if err = p.Err(); err != nil {
 		return
 	}
-	if p.dumpFile != nil {
-		data.Dump(1, p.dumpFile)
-	}
-	if !p.PubVideo {
-		return ErrMuted
-	}
-	t := p.VideoTrack.AVTrack
-	if t == nil {
-		t = NewAVTrack(data, p.Logger.With("track", "video"), &p.Publish, p.videoReady)
-		p.VideoTrack.Set(t)
-		p.Call(p.trackAdded)
-	}
-	err = data.Parse(t)
-	if err != nil {
-		return nil
-	}
-	p.fixTimestamp(t, data)
-	defer t.SpeedControl(p.Speed)
+	avFrame := &t.Value
 	oldCodecCtx := t.ICodecCtx
-	codecCtxChanged := oldCodecCtx != t.ICodecCtx
+	var codecCtxChanged bool
+	codecCtxChanged, err = p.checkCodecChange(t)
 	if err != nil {
-		p.Error("parse", "err", err)
 		return err
-	}
-	if t.ICodecCtx == nil {
-		return ErrUnsupportCodec
 	}
 	if codecCtxChanged && oldCodecCtx != nil {
 		oldWidth, oldHeight := oldCodecCtx.(IVideoCodecCtx).Width(), oldCodecCtx.(IVideoCodecCtx).Height()
@@ -394,7 +427,8 @@ func (p *Publisher) WriteVideo(data IAVFrame) (err error) {
 			p.dropAfterTs = 0
 		}
 	}
-	if t.Value.IDR {
+
+	if avFrame.IDR {
 		if !t.IsReady() {
 			t.Ready(nil)
 		} else if idr != nil {
@@ -406,142 +440,37 @@ func (p *Publisher) WriteVideo(data IAVFrame) (err error) {
 			p.AudioTrack.PushIDR()
 		}
 	}
-	p.writeAV(t, data)
-	if p.VideoTrack.Length > 1 && p.VideoTrack.IsReady() {
-		if t.Value.Raw == nil {
-			if err = t.Value.Demux(t.ICodecCtx); err != nil {
-				t.Error("to raw", "err", err)
-				return err
-			}
-		}
-		for i, track := range p.VideoTrack.Items[1:] {
-			toType := track.FrameType.Elem()
-			toFrame := reflect.New(toType).Interface().(IAVFrame)
-			if track.ICodecCtx == nil {
-				if track.ICodecCtx, track.SequenceFrame, err = toFrame.ConvertCtx(t.ICodecCtx); err != nil {
-					track.Error("DecodeConfig", "err", err)
-					return
-				}
-				if t.IDRingList.Len() > 0 {
-					for rf := t.IDRingList.Front().Value; rf != t.Ring; rf = rf.Next() {
-						if i == 0 && rf.Value.Raw == nil {
-							if err = rf.Value.Demux(t.ICodecCtx); err != nil {
-								t.Error("to raw", "err", err)
-								return err
-							}
-						}
-						toFrame := reflect.New(toType).Interface().(IAVFrame)
-						toFrame.SetAllocator(data.GetAllocator())
-						toFrame.Mux(track.ICodecCtx, &rf.Value)
-						rf.Value.Wraps = append(rf.Value.Wraps, toFrame)
-					}
-				}
-			}
-			toFrame.SetAllocator(data.GetAllocator())
-			toFrame.Mux(track.ICodecCtx, &t.Value)
-			if codecCtxChanged {
-				track.ICodecCtx, track.SequenceFrame, err = toFrame.ConvertCtx(t.ICodecCtx)
-			}
-			t.Value.Wraps = append(t.Value.Wraps, toFrame)
-			if track.ICodecCtx != nil {
-				track.Ready(err)
-			}
-		}
-	}
-	t.Step()
-	return
+	return p.writeAV(t, avFrame, codecCtxChanged, &p.VideoTrack)
 }
 
-func (p *Publisher) WriteAudio(data IAVFrame) (err error) {
+func (p *Publisher) nextAudio() (err error) {
 	t := p.AudioTrack.AVTrack
 	defer func() {
-		if err != nil {
-			data.Recycle()
-			if err == ErrSkip {
-				err = nil
-			}
+		if err == nil {
+			t.SpeedControl(p.Speed)
+		} else if t != nil {
+			t.Value.Recycle()
 		}
 	}()
 	if err = p.Err(); err != nil {
 		return
 	}
-	if p.dumpFile != nil {
-		data.Dump(0, p.dumpFile)
-	}
-	if !p.PubAudio {
-		return ErrMuted
-	}
-
-	if t == nil {
-		t = NewAVTrack(data, p.Logger.With("track", "audio"), &p.Publish, p.audioReady)
-		p.AudioTrack.Set(t)
-		p.Call(p.trackAdded)
-	}
-	err = data.Parse(t)
+	avFrame := &t.Value
+	var codecCtxChanged bool
+	codecCtxChanged, err = p.checkCodecChange(t)
 	if err != nil {
-		return
+		return err
 	}
-	p.fixTimestamp(t, data)
-	defer t.SpeedControl(p.Speed)
 	// 根据丢帧率进行音频帧丢弃
 	if p.dropAfterTs > 0 {
-		if t != nil {
-			// 使用序列号进行平均丢帧
-			if t.LastTs > p.dropAfterTs {
-				return ErrSkip
-			}
+		if t.LastTs > p.dropAfterTs {
+			return ErrSkip
 		}
 	}
-	oldCodecCtx := t.ICodecCtx
-	codecCtxChanged := oldCodecCtx != t.ICodecCtx
-	if t.ICodecCtx == nil {
-		return ErrUnsupportCodec
+	if !t.IsReady() {
+		t.Ready(nil)
 	}
-	t.Ready(err)
-	p.writeAV(t, data)
-	if p.AudioTrack.Length > 1 && p.AudioTrack.IsReady() {
-		if t.Value.Raw == nil {
-			if err = t.Value.Demux(t.ICodecCtx); err != nil {
-				t.Error("to raw", "err", err)
-				return err
-			}
-		}
-		for i, track := range p.AudioTrack.Items[1:] {
-			toType := track.FrameType.Elem()
-			toFrame := reflect.New(toType).Interface().(IAVFrame)
-			if track.ICodecCtx == nil {
-				if track.ICodecCtx, track.SequenceFrame, err = toFrame.ConvertCtx(t.ICodecCtx); err != nil {
-					track.Error("DecodeConfig", "err", err)
-					return
-				}
-				if idr := p.AudioTrack.GetOldestIDR(); idr != nil {
-					for rf := idr; rf != t.Ring; rf = rf.Next() {
-						if i == 0 && rf.Value.Raw == nil {
-							if err = rf.Value.Demux(t.ICodecCtx); err != nil {
-								t.Error("to raw", "err", err)
-								return err
-							}
-						}
-						toFrame := reflect.New(toType).Interface().(IAVFrame)
-						toFrame.SetAllocator(data.GetAllocator())
-						toFrame.Mux(track.ICodecCtx, &rf.Value)
-						rf.Value.Wraps = append(rf.Value.Wraps, toFrame)
-					}
-				}
-			}
-			toFrame.SetAllocator(data.GetAllocator())
-			toFrame.Mux(track.ICodecCtx, &t.Value)
-			if codecCtxChanged {
-				track.ICodecCtx, track.SequenceFrame, err = toFrame.ConvertCtx(t.ICodecCtx)
-			}
-			t.Value.Wraps = append(t.Value.Wraps, toFrame)
-			if track.ICodecCtx != nil {
-				track.Ready(err)
-			}
-		}
-	}
-	t.Step()
-	return
+	return p.writeAV(t, avFrame, codecCtxChanged, &p.AudioTrack)
 }
 
 func (p *Publisher) WriteData(data IDataFrame) (err error) {
@@ -600,9 +529,6 @@ func (p *Publisher) Dispose() {
 	p.AudioTrack.Dispose()
 	p.VideoTrack.Dispose()
 	p.Info("unpublish", "remain", s.Streams.Length, "reason", p.StopReason())
-	if p.dumpFile != nil {
-		p.dumpFile.Close()
-	}
 	p.State = PublisherStateDisposed
 	p.processPullProxyOnDispose()
 }
@@ -653,7 +579,7 @@ func (p *Publisher) takeOver(old *Publisher) {
 }
 
 func (p *Publisher) WaitTrack(audio, video bool) error {
-	var v, a = pkg.ErrNoTrack, pkg.ErrNoTrack
+	var v, a = ErrNoTrack, ErrNoTrack
 	// wait any track
 	if p.PubAudio && p.PubVideo && !audio && !video {
 		select {
@@ -732,4 +658,120 @@ func (p *Publisher) GetPosition() (t time.Time) {
 		return p.OnGetPosition()
 	}
 	return
+}
+
+type PublishAudioWriter[A IAVFrame] struct {
+	AudioFrame A
+	*Publisher
+	*util.ScalableMemoryAllocator
+	audioTrack *AVTrack
+}
+
+func NewPublishAudioWriter[A IAVFrame](puber *Publisher, allocator *util.ScalableMemoryAllocator) *PublishAudioWriter[A] {
+	pw := &PublishAudioWriter[A]{
+		Publisher:               puber,
+		ScalableMemoryAllocator: allocator,
+	}
+	if pw.PubAudio {
+		t := pw.audioTrack
+		if t == nil {
+			var tmp A
+			t = NewAVTrack(reflect.TypeOf(tmp), pw.Logger.With("track", "audio"), &pw.Publish, pw.audioReady)
+			pw.AudioTrack.Set(t)
+			pw.Call(pw.trackAdded)
+		}
+		pw.audioTrack = t
+		pw.AudioFrame = pw.getAudioFrameToWrite()
+	}
+	return pw
+}
+
+func (pw *PublishAudioWriter[A]) getAudioFrameToWrite() (frame A) {
+	if !pw.PubAudio || pw.audioTrack == nil {
+		return
+	}
+	t := pw.audioTrack
+	avFrame := &t.Value
+	if avFrame.Sample == nil {
+		avFrame.Wraps = append(avFrame.Wraps, t.NewFrame(avFrame))
+	}
+	avFrame.ICodecCtx = t.ICodecCtx
+	frame = avFrame.Wraps[0].(A)
+	frame.GetSample().SetAllocator(pw.ScalableMemoryAllocator)
+	return
+}
+
+func (pw *PublishAudioWriter[A]) NextAudio() (err error) {
+	if err = pw.nextAudio(); err != nil {
+		if err == ErrSkip {
+			return nil
+		}
+		return
+	}
+	pw.AudioFrame = pw.getAudioFrameToWrite()
+	return
+}
+
+type PublishVideoWriter[V IAVFrame] struct {
+	VideoFrame V
+	*Publisher
+	*util.ScalableMemoryAllocator
+	videoTrack *AVTrack
+}
+
+func NewPublishVideoWriter[V IAVFrame](puber *Publisher, allocator *util.ScalableMemoryAllocator) *PublishVideoWriter[V] {
+	pw := &PublishVideoWriter[V]{
+		Publisher:               puber,
+		ScalableMemoryAllocator: allocator,
+	}
+	if pw.PubVideo {
+		t := pw.videoTrack
+		if t == nil {
+			var tmp V
+			t = NewAVTrack(reflect.TypeOf(tmp), pw.Logger.With("track", "video"), &pw.Publish, pw.videoReady)
+			pw.VideoTrack.Set(t)
+			pw.Call(pw.trackAdded)
+		}
+		pw.videoTrack = t
+		pw.VideoFrame = pw.getVideoFrameToWrite()
+	}
+	return pw
+}
+
+func (pw *PublishVideoWriter[V]) getVideoFrameToWrite() (frame V) {
+	if !pw.PubVideo || pw.videoTrack == nil {
+		return
+	}
+	t := pw.videoTrack
+	avFrame := &t.Value
+	if avFrame.Sample == nil {
+		avFrame.Wraps = append(avFrame.Wraps, t.NewFrame(avFrame))
+	}
+	avFrame.ICodecCtx = t.ICodecCtx
+	frame = avFrame.Wraps[0].(V)
+	frame.GetSample().SetAllocator(pw.ScalableMemoryAllocator)
+	return
+}
+
+func (pw *PublishVideoWriter[V]) NextVideo() (err error) {
+	if err = pw.nextVideo(); err != nil {
+		if err == ErrSkip {
+			return nil
+		}
+		return
+	}
+	pw.VideoFrame = pw.getVideoFrameToWrite()
+	return
+}
+
+type PublishWriter[A IAVFrame, V IAVFrame] struct {
+	*PublishAudioWriter[A]
+	*PublishVideoWriter[V]
+}
+
+func NewPublisherWriter[A IAVFrame, V IAVFrame](puber *Publisher, allocator *util.ScalableMemoryAllocator) *PublishWriter[A, V] {
+	return &PublishWriter[A, V]{
+		PublishAudioWriter: NewPublishAudioWriter[A](puber, allocator),
+		PublishVideoWriter: NewPublishVideoWriter[V](puber, allocator),
+	}
 }

@@ -68,7 +68,7 @@ func NewPlatform(pm *gb28181.PlatformModel, plugin *GB28181Plugin, unRegister bo
 	p.ctx = context.Background()
 	client, err := sipgo.NewClient(p.plugin.ua, sipgo.WithClientHostname(p.PlatformModel.DeviceIP), sipgo.WithClientPort(p.PlatformModel.DevicePort))
 	if err != nil {
-		p.Error("failed to create sip client: %v", err)
+		p.Error("failed to create sip client", "err", err)
 	}
 	p.Client = client
 	userAgentHeader := sip.NewHeader("User-Agent", "M7S/"+m7s.Version)
@@ -114,7 +114,7 @@ func (p *Platform) Start() error {
 	if p.unRegister {
 		err := p.Unregister()
 		if err != nil {
-			p.Error("failed to unregister: %v", err)
+			p.Error("failed to unregister", "err", err)
 		}
 		p.unRegister = false
 	}
@@ -508,7 +508,7 @@ func (p *Platform) handleCatalog(req *sip.Request, tx sip.ServerTransaction, msg
 	}
 
 	// 发送目录响应，无论是否有通道
-	p.plugin.Info("get channels success", channels)
+	p.plugin.Info("get channels success", "channels", channels)
 	return p.sendCatalogResponse(req, sn, fromTag, channels)
 }
 

@@ -175,8 +175,8 @@ func (t *Transformer) Start() (err error) {
 func (t *Transformer) Go() error {
 	t.SetDescription("pid", t.ffmpeg.Process.Pid)
 	if t.From.Mode == "pipe" {
-		rBuf := make(chan []byte, 100)
-		t.ffmpeg.Stdin = util.NewBufReaderChan(rBuf)
+		bufReader := util.NewBufReaderChan(100)
+		t.ffmpeg.Stdin = bufReader
 		var live flv.Live
 		live.Subscriber = t.TransformJob.Subscriber
 		var bufferFull time.Time
@@ -185,10 +185,9 @@ func (t *Transformer) Go() error {
 			for _, b := range flv {
 				buffer = append(buffer, b...)
 			}
-			select {
-			case rBuf <- buffer:
+			if bufReader.Feed(buffer) {
 				bufferFull = time.Now()
-			default:
+			} else {
 				t.Warn("pipe input buffer full")
 				if time.Since(bufferFull) > time.Second*5 {
 					t.Stop(bufio.ErrBufferFull)
@@ -196,7 +195,7 @@ func (t *Transformer) Go() error {
 			}
 			return
 		}
-		defer close(rBuf)
+		defer bufReader.Recycle()
 		return live.Run()
 	} else {
 		if err := t.ffmpeg.Wait(); err != nil {

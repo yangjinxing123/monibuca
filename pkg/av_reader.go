@@ -174,7 +174,9 @@ func (r *AVRingReader) ReadFrame(conf *config.Subscribe) (err error) {
 	r.Delay = r.Track.LastValue.Sequence - r.Value.Sequence
 	// fmt.Println(r.Delay)
 	if r.Track.ICodecCtx != nil {
-		r.Log(context.TODO(), task.TraceLevel, r.Track.FourCC().String(), "ts", r.Value.Timestamp, "delay", r.Delay, "bps", r.BPS)
+		if r.Logger.Enabled(context.TODO(), task.TraceLevel) {
+			r.Log(context.TODO(), task.TraceLevel, r.Track.FourCC().String(), "ts", r.Value.Timestamp, "delay", r.Delay, "bps", r.BPS)
+		}
 	} else {
 		r.Warn("no codec")
 	}

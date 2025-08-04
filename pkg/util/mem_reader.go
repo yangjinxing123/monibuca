@@ -2,93 +2,23 @@ package util
 
 import (
 	"io"
-	"net"
 	"slices"
 )
 
-type Memory struct {
-	Size int
-	net.Buffers
-}
-
 type MemoryReader struct {
 	*Memory
-	Length  int
-	offset0 int
-	offset1 int
+	Length, offset0, offset1 int
 }
 
-func NewReadableBuffersFromBytes(b ...[]byte) *MemoryReader {
+func NewReadableBuffersFromBytes(b ...[]byte) MemoryReader {
 	buf := &Memory{Buffers: b}
 	for _, level0 := range b {
 		buf.Size += len(level0)
 	}
-	return &MemoryReader{Memory: buf, Length: buf.Size}
+	return MemoryReader{Memory: buf, Length: buf.Size}
 }
 
-func NewMemory(buf []byte) Memory {
-	return Memory{
-		Buffers: net.Buffers{buf},
-		Size:    len(buf),
-	}
-}
-
-func (m *Memory) UpdateBuffer(index int, buf []byte) {
-	if index < 0 {
-		index = len(m.Buffers) + index
-	}
-	m.Size = len(buf) - len(m.Buffers[index])
-	m.Buffers[index] = buf
-}
-
-func (m *Memory) CopyFrom(b *Memory) {
-	buf := make([]byte, b.Size)
-	b.CopyTo(buf)
-	m.AppendOne(buf)
-}
-
-func (m *Memory) CopyTo(buf []byte) {
-	for _, b := range m.Buffers {
-		l := len(b)
-		copy(buf, b)
-		buf = buf[l:]
-	}
-}
-
-func (m *Memory) ToBytes() []byte {
-	buf := make([]byte, m.Size)
-	m.CopyTo(buf)
-	return buf
-}
-
-func (m *Memory) AppendOne(b []byte) {
-	m.Buffers = append(m.Buffers, b)
-	m.Size += len(b)
-}
-
-func (m *Memory) Append(b ...[]byte) {
-	m.Buffers = append(m.Buffers, b...)
-	for _, level0 := range b {
-		m.Size += len(level0)
-	}
-}
-
-func (m *Memory) Count() int {
-	return len(m.Buffers)
-}
-
-func (m *Memory) Range(yield func([]byte)) {
-	for i := range m.Count() {
-		yield(m.Buffers[i])
-	}
-}
-
-func (m *Memory) NewReader() *MemoryReader {
-	var reader MemoryReader
-	reader.Memory = m
-	reader.Length = m.Size
-	return &reader
-}
+var _ io.Reader = (*MemoryReader)(nil)
 
 func (r *MemoryReader) Offset() int {
 	return r.Size - r.Length
@@ -108,9 +38,9 @@ func (r *MemoryReader) MoveToEnd() {
 	r.Length = 0
 }
 
-func (r *MemoryReader) ReadBytesTo(buf []byte) (actual int) {
+func (r *MemoryReader) Read(buf []byte) (actual int, err error) {
 	if r.Length == 0 {
-		return 0
+		return 0, io.EOF
 	}
 	n := len(buf)
 	curBuf := r.GetCurrent()
@@ -142,6 +72,7 @@ func (r *MemoryReader) ReadBytesTo(buf []byte) (actual int) {
 		actual += curBufLen
 		r.skipBuf()
 		if r.Length == 0 && n > 0 {
+			err = io.EOF
 			return
 		}
 	}
@@ -204,6 +135,9 @@ func (r *MemoryReader) getCurrentBufLen() int {
 	return len(r.Memory.Buffers[r.offset0]) - r.offset1
 }
 func (r *MemoryReader) Skip(n int) error {
+	if n <= 0 {
+		return nil
+	}
 	if n > r.Length {
 		return io.EOF
 	}
@@ -248,8 +182,8 @@ func (r *MemoryReader) ReadBytes(n int) ([]byte, error) {
 		return nil, io.EOF
 	}
 	b := make([]byte, n)
-	actual := r.ReadBytesTo(b)
-	return b[:actual], nil
+	actual, err := r.Read(b)
+	return b[:actual], err
 }
 
 func (r *MemoryReader) ReadBE(n int) (num uint32, err error) {

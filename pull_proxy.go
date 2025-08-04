@@ -57,7 +57,7 @@ type (
 	}
 	PullProxyFactory = func() IPullProxy
 	PullProxyManager struct {
-		task.Manager[uint, IPullProxy]
+		task.WorkCollection[uint, IPullProxy]
 	}
 	BasePullProxy struct {
 		*PullProxyConfig
@@ -204,7 +204,7 @@ func (d *TCPPullProxy) Tick(any) {
 
 func (p *Publisher) processPullProxyOnStart() {
 	s := p.Plugin.Server
-	if pullProxy, ok := s.PullProxies.SafeFind(func(pullProxy IPullProxy) bool {
+	if pullProxy, ok := s.PullProxies.Find(func(pullProxy IPullProxy) bool {
 		return pullProxy.GetStreamPath() == p.StreamPath
 	}); ok {
 		p.PullProxyConfig = pullProxy.GetConfig()
@@ -220,29 +220,41 @@ func (p *Publisher) processPullProxyOnStart() {
 func (p *Publisher) processPullProxyOnDispose() {
 	s := p.Plugin.Server
 	if p.PullProxyConfig != nil && p.PullProxyConfig.Status == PullProxyStatusPulling {
-		if pullproxy, ok := s.PullProxies.SafeGet(p.PullProxyConfig.GetKey()); ok {
+		if pullproxy, ok := s.PullProxies.Get(p.PullProxyConfig.GetKey()); ok {
 			pullproxy.ChangeStatus(PullProxyStatusOnline)
 		}
 	}
 }
 
 func (s *Server) createPullProxy(conf *PullProxyConfig) (pullProxy IPullProxy, err error) {
-	for plugin := range s.Plugins.Range {
-		if plugin.Meta.NewPullProxy != nil && strings.EqualFold(conf.Type, plugin.Meta.Name) {
-			pullProxy = plugin.Meta.NewPullProxy()
-			base := pullProxy.GetBase()
-			base.PullProxyConfig = conf
-			base.Plugin = plugin
-			s.PullProxies.Add(pullProxy, plugin.Logger.With("pullProxyId", conf.ID, "pullProxyType", conf.Type, "pullProxyName", conf.Name))
-			return
+	var plugin *Plugin
+	switch conf.Type {
+	case "h265", "h264":
+		if s.Meta.NewPullProxy != nil {
+			plugin = &s.Plugin
+		}
+	default:
+		for p := range s.Plugins.Range {
+			if p.Meta.NewPullProxy != nil && strings.EqualFold(conf.Type, p.Meta.Name) {
+				plugin = p
+				break
+			}
 		}
 	}
+	if plugin == nil {
+		return
+	}
+	pullProxy = plugin.Meta.NewPullProxy()
+	base := pullProxy.GetBase()
+	base.PullProxyConfig = conf
+	base.Plugin = plugin
+	s.PullProxies.AddTask(pullProxy, plugin.Logger.With("pullProxyId", conf.ID, "pullProxyType", conf.Type, "pullProxyName", conf.Name))
 	return
 }
 
 func (s *Server) GetPullProxyList(ctx context.Context, req *emptypb.Empty) (res *pb.PullProxyListResponse, err error) {
 	res = &pb.PullProxyListResponse{}
-	for device := range s.PullProxies.SafeRange {
+	for device := range s.PullProxies.Range {
 		conf := device.GetConfig()
 		res.Data = append(res.Data, &pb.PullProxyInfo{
 			Name:           conf.Name,
@@ -305,6 +317,9 @@ func (s *Server) AddPullProxy(ctx context.Context, req *pb.PullProxyInfo) (res *
 	}
 	defaults.SetDefaults(&pullProxyConfig.Pull)
 	defaults.SetDefaults(&pullProxyConfig.Record)
+	if pullProxyConfig.PullOnStart {
+		pullProxyConfig.Pull.MaxRetry = -1
+	}
 	pullProxyConfig.URL = req.PullURL
 	pullProxyConfig.Audio = req.Audio
 	pullProxyConfig.StopOnIdle = req.StopOnIdle
@@ -402,6 +417,11 @@ func (s *Server) UpdatePullProxy(ctx context.Context, req *pb.UpdatePullProxyReq
 	if req.PullOnStart != nil {
 		target.PullOnStart = *req.PullOnStart
 	}
+	if target.PullOnStart {
+		target.Pull.MaxRetry = -1
+	} else {
+		target.Pull.MaxRetry = 0
+	}
 	if req.StopOnIdle != nil {
 		target.StopOnIdle = *req.StopOnIdle
 	}
@@ -447,7 +467,7 @@ func (s *Server) UpdatePullProxy(ctx context.Context, req *pb.UpdatePullProxyReq
 	isNowDisabled := target.Status == PullProxyStatusDisabled
 	wasEnabled := originalStatus != PullProxyStatusDisabled
 
-	if device, ok := s.PullProxies.SafeGet(uint(req.ID)); ok {
+	if device, ok := s.PullProxies.Get(uint(req.ID)); ok {
 		// 如果现在变为 disable 状态，需要停止并移除代理
 		if wasEnabled && isNowDisabled {
 			device.Stop(task.ErrStopByUser)
@@ -502,7 +522,7 @@ func (s *Server) RemovePullProxy(ctx context.Context, req *pb.RequestWithId) (re
 			ID: uint(req.Id),
 		})
 		err = tx.Error
-		if device, ok := s.PullProxies.SafeGet(uint(req.Id)); ok {
+		if device, ok := s.PullProxies.Get(uint(req.Id)); ok {
 			device.Stop(task.ErrStopByUser)
 		}
 		return
@@ -513,7 +533,7 @@ func (s *Server) RemovePullProxy(ctx context.Context, req *pb.RequestWithId) (re
 			for _, device := range deviceList {
 				tx := s.DB.Delete(&PullProxyConfig{}, device.ID)
 				err = tx.Error
-				if device, ok := s.PullProxies.SafeGet(uint(device.ID)); ok {
+				if device, ok := s.PullProxies.Get(uint(device.ID)); ok {
 					device.Stop(task.ErrStopByUser)
 				}
 			}
@@ -522,14 +542,5 @@ func (s *Server) RemovePullProxy(ctx context.Context, req *pb.RequestWithId) (re
 	} else {
 		res.Message = "parameter wrong"
 		return
-	}
-}
-
-func (p *PullProxyManager) CheckToPull(streamPath string) {
-	for pullProxy := range p.SafeRange {
-		conf := pullProxy.GetConfig()
-		if conf.Status == PullProxyStatusOnline && pullProxy.GetStreamPath() == streamPath {
-			pullProxy.Pull()
-		}
 	}
 }

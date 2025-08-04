@@ -18,6 +18,7 @@ import (
 	"m7s.live/v5"
 	"m7s.live/v5/pkg/task"
 	"m7s.live/v5/pkg/util"
+	mrtp "m7s.live/v5/plugin/rtp/pkg"
 )
 
 type DeviceRegisterQueueTask struct {
@@ -264,7 +265,7 @@ func (task *registerHandlerTask) RecoverDevice(d *Device, req *sip.Request) {
 			if sourceIPParse.IsPrivate() { // 源IP是内网IP
 				myWanIP = myLanIP // 使用内网IP作为外网IP
 			}
-		} else {                           // 目标地址是IP
+		} else { // 目标地址是IP
 			if sourceIPParse.IsPrivate() { // 源IP是内网IP
 				myLanIP, myWanIP = myIP, myIP // 使用目标IP作为内外网IP
 			}
@@ -322,7 +323,7 @@ func (task *registerHandlerTask) RecoverDevice(d *Device, req *sip.Request) {
 }
 
 func (task *registerHandlerTask) StoreDevice(deviceid string, req *sip.Request, d *Device) {
-	task.gb.Debug("deviceid is ", deviceid, "req.via() is ", req.Via(), "req.Source() is ", req.Source())
+	task.gb.Debug("device info", "deviceid", deviceid, "via", req.Via(), "source", req.Source())
 	source := req.Source()
 	sourceIP, sourcePortStr, _ := net.SplitHostPort(source)
 	sourcePort, _ := strconv.Atoi(sourcePortStr)
@@ -372,7 +373,7 @@ func (task *registerHandlerTask) StoreDevice(deviceid string, req *sip.Request, 
 			if sourceIPParse.IsPrivate() { // 源IP是内网IP
 				myWanIP = myLanIP // 使用内网IP作为外网IP
 			}
-		} else {                           // 目标地址是IP
+		} else { // 目标地址是IP
 			if sourceIPParse.IsPrivate() { // 源IP是内网IP
 				myLanIP, myWanIP = myIP, myIP // 使用目标IP作为内外网IP
 			}
@@ -393,10 +394,10 @@ func (task *registerHandlerTask) StoreDevice(deviceid string, req *sip.Request, 
 	d.KeepaliveTime = now
 	d.Status = DeviceOnlineStatus
 	d.Online = true
-	d.StreamMode = "TCP-PASSIVE"  // 默认UDP传输
-	d.Charset = "GB2312"          // 默认GB2312字符集
-	d.GeoCoordSys = "WGS84"       // 默认WGS84坐标系
-	d.Transport = req.Transport() // 传输协议
+	d.StreamMode = mrtp.StreamModeTCPPassive // 默认TCP-PASSIVE传输
+	d.Charset = "GB2312"                     // 默认GB2312字符集
+	d.GeoCoordSys = "WGS84"                  // 默认WGS84坐标系
+	d.Transport = req.Transport()            // 传输协议
 	d.IP = sourceIP
 	d.Port = sourcePort
 	d.HostAddress = sourceIP + ":" + sourcePortStr
@@ -443,7 +444,7 @@ func (task *registerHandlerTask) StoreDevice(deviceid string, req *sip.Request, 
 	d.Task.ID = hash
 
 	d.channels.OnAdd(func(c *Channel) {
-		if absDevice, ok := task.gb.Server.PullProxies.SafeFind(func(absDevice m7s.IPullProxy) bool {
+		if absDevice, ok := task.gb.Server.PullProxies.Find(func(absDevice m7s.IPullProxy) bool {
 			conf := absDevice.GetConfig()
 			return conf.Type == "gb28181" && conf.URL == fmt.Sprintf("%s/%s", d.DeviceId, c.ChannelId)
 		}); ok {

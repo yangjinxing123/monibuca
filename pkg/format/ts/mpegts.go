@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"io/ioutil"
+	"time"
+
+	"m7s.live/v5"
+	"m7s.live/v5/pkg/codec"
+	"m7s.live/v5/pkg/format"
 	"m7s.live/v5/pkg/util"
 	//"sync"
 )
@@ -101,22 +105,16 @@ const (
 //
 
 type MpegTsStream struct {
-	PAT       MpegTsPAT // PAT表信息
-	PMT       MpegTsPMT // PMT表信息
-	PESBuffer map[uint16]*MpegTsPESPacket
-	PESChan   chan *MpegTsPESPacket
+	PAT                        MpegTsPAT // PAT表信息
+	PMT                        MpegTsPMT // PMT表信息
+	Publisher                  *m7s.Publisher
+	Allocator                  *util.ScalableMemoryAllocator
+	writer                     m7s.PublishWriter[*format.Mpeg2Audio, *VideoFrame]
+	audioPID, videoPID, pmtPID uint16
+	tsPacket                   [TS_PACKET_SIZE]byte
 }
 
 // ios13818-1-CN.pdf 33/165
-//
-// TS
-//
-
-// Packet == Header + Payload == 188 bytes
-type MpegTsPacket struct {
-	Header  MpegTsHeader
-	Payload []byte
-}
 
 // 前面32bit的数据即TS分组首部,它指出了这个分组的属性
 type MpegTsHeader struct {
@@ -183,25 +181,6 @@ type MpegTsDescriptor struct {
 	Tag    byte // 8 bits 标识每一个描述符
 	Length byte // 8 bits 指定紧随 descriptor_length 字段的描述符的字节数
 	Data   []byte
-}
-
-func ReadTsPacket(r io.Reader) (packet MpegTsPacket, err error) {
-	lr := &io.LimitedReader{R: r, N: TS_PACKET_SIZE}
-
-	// header
-	packet.Header, err = ReadTsHeader(lr)
-	if err != nil {
-		return
-	}
-
-	// payload
-	packet.Payload = make([]byte, lr.N)
-	_, err = lr.Read(packet.Payload)
-	if err != nil {
-		return
-	}
-
-	return
 }
 
 func ReadTsHeader(r io.Reader) (header MpegTsHeader, err error) {
@@ -365,7 +344,7 @@ func ReadTsHeader(r io.Reader) (header MpegTsHeader, err error) {
 				// Discard 是一个 io.Writer,对它进行的任何 Write 调用都将无条件成功
 				// 但是ioutil.Discard不记录copy得到的数值
 				// 用于发送需要读取但不想存储的数据,目的是耗尽读取端的数据
-				if _, err = io.CopyN(ioutil.Discard, lr, int64(lr.N)); err != nil {
+				if _, err = io.CopyN(io.Discard, lr, int64(lr.N)); err != nil {
 					return
 				}
 			}
@@ -440,138 +419,95 @@ func WriteTsHeader(w io.Writer, header MpegTsHeader) (written int, err error) {
 	return
 }
 
-//
-//func (s *MpegTsStream) TestWrite(fileName string) error {
-//
-//	if fileName != "" {
-//		file, err := os.Create(fileName)
-//		if err != nil {
-//			panic(err)
-//		}
-//		defer file.Close()
-//
-//		patTsHeader := []byte{0x47, 0x40, 0x00, 0x10}
-//
-//		if err := WritePATPacket(file, patTsHeader, *s.pat); err != nil {
-//			panic(err)
-//		}
-//
-//		// TODO:这里的pid应该是由PAT给的
-//		pmtTsHeader := []byte{0x47, 0x41, 0x00, 0x10}
-//
-//		if err := WritePMTPacket(file, pmtTsHeader, *s.pmt); err != nil {
-//			panic(err)
-//		}
-//	}
-//
-//	var videoFrame int
-//	var audioFrame int
-//	for {
-//		tsPesPkt, ok := <-s.TsPesPktChan
-//		if !ok {
-//			fmt.Println("frame index, video , audio :", videoFrame, audioFrame)
-//			break
-//		}
-//
-//		if tsPesPkt.PesPkt.Header.StreamID == STREAM_ID_AUDIO {
-//			audioFrame++
-//		}
-//
-//		if tsPesPkt.PesPkt.Header.StreamID == STREAM_ID_VIDEO {
-//			println(tsPesPkt.PesPkt.Header.Pts)
-//			videoFrame++
-//		}
-//
-//		fmt.Sprintf("%s", tsPesPkt)
-//
-//		// if err := WritePESPacket(file, tsPesPkt.TsPkt.Header, tsPesPkt.PesPkt); err != nil {
-//		// 	return err
-//		// }
-//
-//	}
-//
-//	return nil
-//}
-
-func (s *MpegTsStream) ReadPAT(packet *MpegTsPacket, pr io.Reader) (err error) {
-	// 首先找到PID==0x00的TS包(PAT)
-	if PID_PAT == packet.Header.Pid {
-		if len(packet.Payload) == 188 {
-			pr = &util.Crc32Reader{R: pr, Crc32: 0xffffffff}
-		}
-		// Header + PSI + Paylod
-		s.PAT, err = ReadPAT(pr)
-	}
-	return
-}
-func (s *MpegTsStream) ReadPMT(packet *MpegTsPacket, pr io.Reader) (err error) {
-	// 在读取PAT中已经将所有频道节目信息(PMT_PID)保存了起来
-	// 接着读取所有TS包里面的PID,找出PID==PMT_PID的TS包,就是PMT表
-	for _, v := range s.PAT.Program {
-		if v.ProgramMapPID == packet.Header.Pid {
-			if len(packet.Payload) == 188 {
-				pr = &util.Crc32Reader{R: pr, Crc32: 0xffffffff}
-			}
-			// Header + PSI + Paylod
-			s.PMT, err = ReadPMT(pr)
-		}
-	}
-	return
-}
 func (s *MpegTsStream) Feed(ts io.Reader) (err error) {
+	writer := &s.writer
 	var reader bytes.Reader
 	var lr io.LimitedReader
 	lr.R = &reader
 	var tsHeader MpegTsHeader
-	tsData := make([]byte, TS_PACKET_SIZE)
+	var pesHeader MpegPESHeader
 	for {
-		_, err = io.ReadFull(ts, tsData)
+		_, err = io.ReadFull(ts, s.tsPacket[:])
 		if err == io.EOF {
-			// 文件结尾 把最后面的数据发出去
-			for _, pesPkt := range s.PESBuffer {
-				if pesPkt != nil {
-					s.PESChan <- pesPkt
-				}
-			}
 			return nil
-		} else if err != nil {
-			return
 		}
-		reader.Reset(tsData)
+		reader.Reset(s.tsPacket[:])
 		lr.N = TS_PACKET_SIZE
 		if tsHeader, err = ReadTsHeader(&lr); err != nil {
 			return
 		}
-		if tsHeader.Pid == PID_PAT {
+		switch tsHeader.Pid {
+		case PID_PAT:
 			if s.PAT, err = ReadPAT(&lr); err != nil {
 				return
 			}
+			s.pmtPID = s.PAT.Program[0].ProgramMapPID
 			continue
-		}
-		if len(s.PMT.Stream) == 0 {
-			for _, v := range s.PAT.Program {
-				if v.ProgramMapPID == tsHeader.Pid {
-					if s.PMT, err = ReadPMT(&lr); err != nil {
-						return
-					}
-					for _, v := range s.PMT.Stream {
-						s.PESBuffer[v.ElementaryPID] = nil
-					}
-				}
+		case s.pmtPID:
+			if len(s.PMT.Stream) != 0 {
 				continue
 			}
-		} else if pesPkt, ok := s.PESBuffer[tsHeader.Pid]; ok {
-			if tsHeader.PayloadUnitStartIndicator == 1 {
-				if pesPkt != nil {
-					s.PESChan <- pesPkt
-				}
-				pesPkt = &MpegTsPESPacket{}
-				s.PESBuffer[tsHeader.Pid] = pesPkt
-				if pesPkt.Header, err = ReadPESHeader(&lr); err != nil {
-					return
+			if s.PMT, err = ReadPMT(&lr); err != nil {
+				return
+			}
+			for _, pmt := range s.PMT.Stream {
+				switch pmt.StreamType {
+				case STREAM_TYPE_H265:
+					s.videoPID = pmt.ElementaryPID
+					writer.PublishVideoWriter = m7s.NewPublishVideoWriter[*VideoFrame](s.Publisher, s.Allocator)
+					writer.VideoFrame.ICodecCtx = &codec.H265Ctx{}
+				case STREAM_TYPE_H264:
+					s.videoPID = pmt.ElementaryPID
+					writer.PublishVideoWriter = m7s.NewPublishVideoWriter[*VideoFrame](s.Publisher, s.Allocator)
+					writer.VideoFrame.ICodecCtx = &codec.H264Ctx{}
+				case STREAM_TYPE_AAC:
+					s.audioPID = pmt.ElementaryPID
+					writer.PublishAudioWriter = m7s.NewPublishAudioWriter[*format.Mpeg2Audio](s.Publisher, s.Allocator)
+					writer.AudioFrame.ICodecCtx = &codec.AACCtx{}
+				case STREAM_TYPE_G711A:
+					s.audioPID = pmt.ElementaryPID
+					writer.PublishAudioWriter = m7s.NewPublishAudioWriter[*format.Mpeg2Audio](s.Publisher, s.Allocator)
+					writer.AudioFrame.ICodecCtx = codec.NewPCMACtx()
+				case STREAM_TYPE_G711U:
+					s.audioPID = pmt.ElementaryPID
+					writer.PublishAudioWriter = m7s.NewPublishAudioWriter[*format.Mpeg2Audio](s.Publisher, s.Allocator)
+					writer.AudioFrame.ICodecCtx = codec.NewPCMUCtx()
 				}
 			}
-			io.Copy(&pesPkt.Payload, &lr)
+		case s.audioPID:
+			if tsHeader.PayloadUnitStartIndicator == 1 {
+				if pesHeader, err = ReadPESHeader0(&lr); err != nil {
+					return
+				}
+				if !s.Publisher.PubAudio {
+					continue
+				}
+				if writer.AudioFrame.Size > 0 {
+					if err = writer.NextAudio(); err != nil {
+						continue
+					}
+				}
+				writer.AudioFrame.SetDTS(time.Duration(pesHeader.Pts))
+			}
+			lr.Read(writer.AudioFrame.NextN(int(lr.N)))
+		case s.videoPID:
+			if tsHeader.PayloadUnitStartIndicator == 1 {
+				if pesHeader, err = ReadPESHeader0(&lr); err != nil {
+					return
+				}
+				if !s.Publisher.PubVideo {
+					continue
+				}
+				if writer.VideoFrame.Size > 0 {
+					if err = writer.NextVideo(); err != nil {
+						continue
+					}
+				}
+				writer.VideoFrame.SetDTS(time.Duration(pesHeader.Dts))
+				writer.VideoFrame.SetPTS(time.Duration(pesHeader.Pts))
+
+			}
+			lr.Read(writer.VideoFrame.NextN(int(lr.N)))
 		}
 	}
 }

@@ -2,39 +2,19 @@ package mpegts
 
 import (
 	"errors"
+	"fmt"
 	"io"
+
 	"m7s.live/v5/pkg/util"
-	"net"
 )
 
 // ios13818-1-CN.pdf 45/166
-//
-// PES
-//
 
-// 每个传输流和节目流在逻辑上都是由 PES 包构造的
-type MpegTsPesStream struct {
-	TsPkt  MpegTsPacket
-	PesPkt MpegTsPESPacket
-}
-
-// PES--Packetized  Elementary Streams  (分组的ES),ES形成的分组称为PES分组,是用来传递ES的一种数据结构
-// 1110 xxxx 为视频流(0xE0)
-// 110x xxxx 为音频流(0xC0)
-type MpegTsPESPacket struct {
-	Header  MpegTsPESHeader
-	Payload util.Buffer //从TS包中读取的数据
-	Buffers net.Buffers //用于写TS包
-}
-
-type MpegTsPESHeader struct {
-	PacketStartCodePrefix uint32 // 24 bits 同跟随它的 stream_id 一起组成标识包起始端的包起始码.packet_start_code_prefix 为比特串"0000 0000 0000 0000 0000 0001"(0x000001)
-	StreamID              byte   // 8 bits stream_id 指示基本流的类型和编号,如 stream_id 表 2-22 所定义的.传输流中,stream_id 可以设置为准确描述基本流类型的任何有效值,如表 2-22 所规定的.传输流中，基本流类型在 2.4.4 中所指示的节目特定信息中指定
-	PesPacketLength       uint16 // 16 bits 指示 PES 包中跟随该字段最后字节的字节数.0->指示 PES 包长度既未指示也未限定并且仅在这样的 PES 包中才被允许,该 PES 包的有效载荷由来自传输流包中所包含的视频基本流的字节组成
-
+type MpegPESHeader struct {
+	header          [32]byte
+	StreamID        byte   // 8 bits stream_id 指示基本流的类型和编号,如 stream_id 表 2-22 所定义的.传输流中,stream_id 可以设置为准确描述基本流类型的任何有效值,如表 2-22 所规定的.传输流中，基本流类型在 2.4.4 中所指示的节目特定信息中指定
+	PesPacketLength uint16 // 16 bits 指示 PES 包中跟随该字段最后字节的字节数.0->指示 PES 包长度既未指示也未限定并且仅在这样的 PES 包中才被允许,该 PES 包的有效载荷由来自传输流包中所包含的视频基本流的字节组成
 	MpegTsOptionalPESHeader
-
-	PayloadLength uint64 // 这个不是标准文档里面的字段,是自己添加的,方便计算
 }
 
 // 可选的PES Header = MpegTsOptionalPESHeader + stuffing bytes(0xFF) m * 8
@@ -99,23 +79,33 @@ type MpegTsOptionalPESHeader struct {
 // pts_dts_Flags == "11" -> PTS + DTS
 
 type MpegtsPESFrame struct {
-	Pid                       uint16
-	IsKeyFrame                bool
-	ContinuityCounter         byte
-	ProgramClockReferenceBase uint64
+	Pid               uint16
+	IsKeyFrame        bool
+	ContinuityCounter byte
+	MpegPESHeader
 }
 
-func ReadPESHeader(r io.Reader) (header MpegTsPESHeader, err error) {
-	var flags uint8
-	var length uint
+func CreatePESWriters() (pesAudio, pesVideo MpegtsPESFrame) {
+	pesAudio, pesVideo = MpegtsPESFrame{
+		Pid: PID_AUDIO,
+	}, MpegtsPESFrame{
+		Pid: PID_VIDEO,
+	}
+	pesAudio.StreamID = STREAM_ID_AUDIO
+	pesVideo.StreamID = STREAM_ID_VIDEO
+	return
+}
 
+func ReadPESHeader0(r *io.LimitedReader) (header MpegPESHeader, err error) {
+	var length uint
+	var packetStartCodePrefix uint32
 	// packetStartCodePrefix(24) (0x000001)
-	header.PacketStartCodePrefix, err = util.ReadByteToUint24(r, true)
+	packetStartCodePrefix, err = util.ReadByteToUint24(r, true)
 	if err != nil {
 		return
 	}
 
-	if header.PacketStartCodePrefix != 0x0000001 {
+	if packetStartCodePrefix != 0x0000001 {
 		err = errors.New("read PacketStartCodePrefix is not 0x0000001")
 		return
 	}
@@ -141,18 +131,27 @@ func ReadPESHeader(r io.Reader) (header MpegTsPESHeader, err error) {
 	if length == 0 {
 		length = 1 << 31
 	}
+	var header1 MpegPESHeader
+	header1, err = ReadPESHeader(r)
+	if err == nil {
+		if header.PesPacketLength == 0 {
+			header1.PesPacketLength = uint16(r.N)
+		}
+		header1.StreamID = header.StreamID
+		return header1, nil
+	}
+	return
+}
 
-	// lrPacket 和 lrHeader 位置指针是在同一位置的
-	lrPacket := &io.LimitedReader{R: r, N: int64(length)}
-	lrHeader := lrPacket
-
+func ReadPESHeader(lrPacket *io.LimitedReader) (header MpegPESHeader, err error) {
+	var flags uint8
 	// constTen(2)
 	// pes_ScramblingControl(2)
 	// pes_Priority(1)
 	// dataAlignmentIndicator(1)
 	// copyright(1)
 	// originalOrCopy(1)
-	flags, err = util.ReadByteToUint8(lrHeader)
+	flags, err = util.ReadByteToUint8(lrPacket)
 	if err != nil {
 		return
 	}
@@ -171,7 +170,7 @@ func ReadPESHeader(r io.Reader) (header MpegTsPESHeader, err error) {
 	// additionalCopyInfoFlag(1)
 	// pes_CRCFlag(1)
 	// pes_ExtensionFlag(1)
-	flags, err = util.ReadByteToUint8(lrHeader)
+	flags, err = util.ReadByteToUint8(lrPacket)
 	if err != nil {
 		return
 	}
@@ -185,14 +184,14 @@ func ReadPESHeader(r io.Reader) (header MpegTsPESHeader, err error) {
 	header.PesExtensionFlag = flags & 0x01
 
 	// pes_HeaderDataLength(8)
-	header.PesHeaderDataLength, err = util.ReadByteToUint8(lrHeader)
+	header.PesHeaderDataLength, err = util.ReadByteToUint8(lrPacket)
 	if err != nil {
 		return
 	}
 
-	length = uint(header.PesHeaderDataLength)
+	length := uint(header.PesHeaderDataLength)
 
-	lrHeader = &io.LimitedReader{R: lrHeader, N: int64(length)}
+	lrHeader := &io.LimitedReader{R: lrPacket, N: int64(length)}
 
 	// 00 -> PES 包头中既无任何PTS 字段也无任何DTS 字段存在
 	// 10 -> PES 包头中PTS 字段存在
@@ -219,6 +218,8 @@ func ReadPESHeader(r io.Reader) (header MpegTsPESHeader, err error) {
 		}
 
 		header.Dts = util.GetPtsDts(dts)
+	} else {
+		header.Dts = header.Pts
 	}
 
 	// reserved(2) + escr_Base1(3) + marker_bit(1) +
@@ -336,48 +337,27 @@ func ReadPESHeader(r io.Reader) (header MpegTsPESHeader, err error) {
 		}
 	}
 
-	// 2的16次方,16个字节
-	if lrPacket.N < 65536 {
-		// 这里得到的其实是负载长度,因为已经偏移过了Header部分.
-		//header.pes_PacketLength = uint16(lrPacket.N)
-		header.PayloadLength = uint64(lrPacket.N)
-	}
-
 	return
 }
 
-func WritePESHeader(w io.Writer, header MpegTsPESHeader) (written int, err error) {
-	if header.PacketStartCodePrefix != 0x0000001 {
-		err = errors.New("write PacketStartCodePrefix is not 0x0000001")
-		return
+func (header *MpegPESHeader) WritePESHeader(esSize int) (w util.Buffer, err error) {
+
+	if header.Pts == header.Dts {
+		header.PtsDtsFlags = 0x80
+		header.PesHeaderDataLength = 5
+	} else {
+		header.PtsDtsFlags = 0xC0
+		header.PesHeaderDataLength = 10
 	}
-
-	// packetStartCodePrefix(24) (0x000001)
-	if err = util.WriteUint24ToByte(w, header.PacketStartCodePrefix, true); err != nil {
-		return
+	pktLength := esSize + int(header.PesHeaderDataLength) + 3
+	if pktLength > 0xffff {
+		pktLength = 0
 	}
+	header.PesPacketLength = uint16(pktLength)
 
-	written += 3
-
-	// streamID(8)
-	if err = util.WriteUint8ToByte(w, header.StreamID); err != nil {
-		return
-	}
-
-	written += 1
-
-	// pes_PacketLength(16)
-	// PES包长度可能为0,这个时候,需要自己去算
-	// 0 <= len <= 65535
-	if err = util.WriteUint16ToByte(w, header.PesPacketLength, true); err != nil {
-		return
-	}
-
-	//fmt.Println("Length :", payloadLength)
-	//fmt.Println("PES Packet Length :", header.pes_PacketLength)
-
-	written += 2
-
+	w = header.header[:0]
+	w.WriteUint32(0x00000100 | uint32(header.StreamID))
+	w.WriteUint16(header.PesPacketLength)
 	// constTen(2)
 	// pes_ScramblingControl(2)
 	// pes_Priority(1)
@@ -385,18 +365,9 @@ func WritePESHeader(w io.Writer, header MpegTsPESHeader) (written int, err error
 	// copyright(1)
 	// originalOrCopy(1)
 	// 1000 0001
-	if header.ConstTen != 0x80 {
-		err = errors.New("pes header ConstTen != 0x80")
-		return
-	}
 
-	flags := header.ConstTen | header.PesScramblingControl | header.PesPriority | header.DataAlignmentIndicator | header.Copyright | header.OriginalOrCopy
-	if err = util.WriteUint8ToByte(w, flags); err != nil {
-		return
-	}
-
-	written += 1
-
+	flags := 0x80 | header.PesScramblingControl | header.PesPriority | header.DataAlignmentIndicator | header.Copyright | header.OriginalOrCopy
+	w.WriteByte(flags)
 	// pts_dts_Flags(2)
 	// escr_Flag(1)
 	// es_RateFlag(1)
@@ -405,19 +376,8 @@ func WritePESHeader(w io.Writer, header MpegTsPESHeader) (written int, err error
 	// pes_CRCFlag(1)
 	// pes_ExtensionFlag(1)
 	sevenFlags := header.PtsDtsFlags | header.EscrFlag | header.EsRateFlag | header.DsmTrickModeFlag | header.AdditionalCopyInfoFlag | header.PesCRCFlag | header.PesExtensionFlag
-	if err = util.WriteUint8ToByte(w, sevenFlags); err != nil {
-		return
-	}
-
-	written += 1
-
-	// pes_HeaderDataLength(8)
-	if err = util.WriteUint8ToByte(w, header.PesHeaderDataLength); err != nil {
-		return
-	}
-
-	written += 1
-
+	w.WriteByte(sevenFlags)
+	w.WriteByte(header.PesHeaderDataLength)
 	// PtsDtsFlags == 192(11), 128(10), 64(01)禁用, 0(00)
 	if header.PtsDtsFlags&0x80 != 0 {
 		// PTS和DTS都存在(11),否则只有PTS(10)
@@ -425,30 +385,121 @@ func WritePESHeader(w io.Writer, header MpegTsPESHeader) (written int, err error
 			// 11:PTS和DTS
 			// PTS(33) + 4 + 3
 			pts := util.PutPtsDts(header.Pts) | 3<<36
-			if err = util.WriteUint40ToByte(w, pts, true); err != nil {
+			if err = util.WriteUint40ToByte(&w, pts, true); err != nil {
 				return
 			}
-
-			written += 5
-
 			// DTS(33) + 4 + 3
 			dts := util.PutPtsDts(header.Dts) | 1<<36
-			if err = util.WriteUint40ToByte(w, dts, true); err != nil {
+			if err = util.WriteUint40ToByte(&w, dts, true); err != nil {
 				return
 			}
-
-			written += 5
 		} else {
 			// 10:只有PTS
 			// PTS(33) + 4 + 3
 			pts := util.PutPtsDts(header.Pts) | 2<<36
-			if err = util.WriteUint40ToByte(w, pts, true); err != nil {
+			if err = util.WriteUint40ToByte(&w, pts, true); err != nil {
 				return
 			}
+		}
+	}
+	return
+}
 
-			written += 5
+func (frame *MpegtsPESFrame) WritePESPacket(payload util.Memory, allocator *util.RecyclableMemory) (err error) {
+	var pesHeadItem util.Buffer
+	pesHeadItem, err = frame.WritePESHeader(payload.Size)
+	if err != nil {
+		return
+	}
+	pesBuffers := util.NewMemory(pesHeadItem)
+	payload.Range(pesBuffers.PushOne)
+	pesPktLength := int64(pesBuffers.Size)
+	pesReader := pesBuffers.NewReader()
+	var tsHeaderLength int
+	for i := 0; pesPktLength > 0; i++ {
+		var buffer util.Buffer = allocator.NextN(TS_PACKET_SIZE)
+		bwTsHeader := &buffer
+		bwTsHeader.Reset()
+		tsHeader := MpegTsHeader{
+			SyncByte:                   0x47,
+			TransportErrorIndicator:    0,
+			PayloadUnitStartIndicator:  0,
+			TransportPriority:          0,
+			Pid:                        frame.Pid,
+			TransportScramblingControl: 0,
+			AdaptionFieldControl:       1,
+			ContinuityCounter:          frame.ContinuityCounter,
+		}
+
+		frame.ContinuityCounter++
+		frame.ContinuityCounter = frame.ContinuityCounter % 16
+
+		// 每一帧的开头,当含有pcr的时候,包含调整字段
+		if i == 0 {
+			tsHeader.PayloadUnitStartIndicator = 1
+
+			// 当PCRFlag为1的时候,包含调整字段
+			if frame.IsKeyFrame {
+				tsHeader.AdaptionFieldControl = 0x03
+				tsHeader.AdaptationFieldLength = 7
+				tsHeader.PCRFlag = 1
+				tsHeader.RandomAccessIndicator = 1
+				tsHeader.ProgramClockReferenceBase = frame.Pts
+			}
+		}
+
+		// 每一帧的结尾,当不满足188个字节的时候,包含调整字段
+		if pesPktLength < TS_PACKET_SIZE-4 {
+			var tsStuffingLength uint8
+
+			tsHeader.AdaptionFieldControl = 0x03
+			tsHeader.AdaptationFieldLength = uint8(TS_PACKET_SIZE - 4 - 1 - pesPktLength)
+
+			// TODO:如果第一个TS包也是最后一个TS包,是不是需要考虑这个情况?
+			// MpegTsHeader最少占6个字节.(前4个走字节 + AdaptationFieldLength(1 byte) + 3个指示符5个标志位(1 byte))
+			if tsHeader.AdaptationFieldLength >= 1 {
+				tsStuffingLength = tsHeader.AdaptationFieldLength - 1
+			} else {
+				tsStuffingLength = 0
+			}
+			// error
+			tsHeaderLength, err = WriteTsHeader(bwTsHeader, tsHeader)
+			if err != nil {
+				return
+			}
+			if tsStuffingLength > 0 {
+				if _, err = bwTsHeader.Write(Stuffing[:tsStuffingLength]); err != nil {
+					return
+				}
+			}
+			tsHeaderLength += int(tsStuffingLength)
+		} else {
+
+			tsHeaderLength, err = WriteTsHeader(bwTsHeader, tsHeader)
+			if err != nil {
+				return
+			}
+		}
+
+		tsPayloadLength := TS_PACKET_SIZE - tsHeaderLength
+
+		//fmt.Println("tsPayloadLength :", tsPayloadLength)
+
+		// 这里不断的减少PES包
+		written, _ := io.CopyN(bwTsHeader, &pesReader, int64(tsPayloadLength))
+		// tmp := tsHeaderByte[3] << 2
+		// tmp = tmp >> 6
+		// if tmp == 2 {
+		// 	fmt.Println("fuck you mother.")
+		// }
+		pesPktLength -= written
+		tsPktByteLen := bwTsHeader.Len()
+
+		if tsPktByteLen != TS_PACKET_SIZE {
+			err = errors.New(fmt.Sprintf("%s, packet size=%d", "TS_PACKET_SIZE != 188,", tsPktByteLen))
+			return
 		}
 	}
 
-	return
+	return nil
 }

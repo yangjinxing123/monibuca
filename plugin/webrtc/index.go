@@ -319,12 +319,10 @@ func (p *WebRTCPlugin) configurePort() error {
 			IP:   net.IP{0, 0, 0, 0},
 			Port: tcpport,
 		})
-		p.OnDispose(func() {
-			_ = tcpl.Close()
-		})
 		if err != nil {
 			p.Error("webrtc listener tcp", "error", err)
 		}
+		p.Using(tcpl)
 		p.SetDescription("tcp", fmt.Sprintf("%d", tcpport))
 		p.Info("webrtc start listen", "port", tcpport)
 		p.s.SetICETCPMux(NewICETCPMux(nil, tcpl, 4096))
@@ -339,13 +337,11 @@ func (p *WebRTCPlugin) configurePort() error {
 			IP:   net.IP{0, 0, 0, 0},
 			Port: int(v),
 		})
-		p.OnDispose(func() {
-			_ = udpListener.Close()
-		})
 		if err != nil {
 			p.Error("webrtc listener udp", "error", err)
 			return err
 		}
+		p.Using(udpListener)
 		p.SetDescription("udp", fmt.Sprintf("%d", v))
 		p.Info("webrtc start listen", "port", v)
 		p.s.SetICEUDPMux(NewICEUDPMux(nil, udpListener))
@@ -374,7 +370,7 @@ func (p *WebRTCPlugin) CreatePC(sd SessionDescription, conf Configuration) (pc *
 	return
 }
 
-func (p *WebRTCPlugin) OnInit() (err error) {
+func (p *WebRTCPlugin) Start() (err error) {
 	if len(p.ICEServers) > 0 {
 		for i := range p.ICEServers {
 			b, _ := p.ICEServers[i].MarshalJSON()

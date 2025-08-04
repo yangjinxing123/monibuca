@@ -33,12 +33,21 @@ func (m *Manager[K, T]) Add(ctx T, opt ...any) *Task {
 	return m.AddTask(ctx, opt...)
 }
 
+func (m *Manager[K, T]) SafeHas(key K) (ok bool) {
+	if m.L == nil {
+		m.Call(func() {
+			ok = m.Collection.Has(key)
+		})
+		return ok
+	}
+	return m.Collection.Has(key)
+}
+
 // SafeGet 用于不同协程获取元素，防止并发请求
 func (m *Manager[K, T]) SafeGet(key K) (item T, ok bool) {
 	if m.L == nil {
-		m.Call(func() error {
+		m.Call(func() {
 			item, ok = m.Collection.Get(key)
-			return nil
 		})
 	} else {
 		item, ok = m.Collection.Get(key)
@@ -49,9 +58,8 @@ func (m *Manager[K, T]) SafeGet(key K) (item T, ok bool) {
 // SafeRange 用于不同协程获取元素，防止并发请求
 func (m *Manager[K, T]) SafeRange(f func(T) bool) {
 	if m.L == nil {
-		m.Call(func() error {
+		m.Call(func() {
 			m.Collection.Range(f)
-			return nil
 		})
 	} else {
 		m.Collection.Range(f)
@@ -61,9 +69,8 @@ func (m *Manager[K, T]) SafeRange(f func(T) bool) {
 // SafeFind 用于不同协程获取元素，防止并发请求
 func (m *Manager[K, T]) SafeFind(f func(T) bool) (item T, ok bool) {
 	if m.L == nil {
-		m.Call(func() error {
+		m.Call(func() {
 			item, ok = m.Collection.Find(f)
-			return nil
 		})
 	} else {
 		item, ok = m.Collection.Find(f)

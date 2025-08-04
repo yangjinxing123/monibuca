@@ -169,10 +169,6 @@ func (c *Collection[K, T]) Search(f func(T) bool) func(yield func(item T) bool) 
 	}
 }
 
-func (c *Collection[K, T]) GetKey() K {
-	return c.Items[0].GetKey()
-}
-
 func (c *Collection[K, T]) Clear() {
 	if c.L != nil {
 		c.L.Lock()

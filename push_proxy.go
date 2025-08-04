@@ -52,7 +52,7 @@ type (
 	}
 	PushProxyFactory = func() IPushProxy
 	PushProxyManager struct {
-		task.Manager[uint, IPushProxy]
+		task.WorkCollection[uint, IPushProxy]
 	}
 	BasePushProxy struct {
 		*PushProxyConfig
@@ -91,7 +91,7 @@ func (s *Server) createPushProxy(conf *PushProxyConfig) (pushProxy IPushProxy, e
 			base := pushProxy.GetBase()
 			base.PushProxyConfig = conf
 			base.Plugin = plugin
-			s.PushProxies.Add(pushProxy, plugin.Logger.With("pushProxyId", conf.ID, "pushProxyType", conf.Type, "pushProxyName", conf.Name))
+			s.PushProxies.AddTask(pushProxy, plugin.Logger.With("pushProxyId", conf.ID, "pushProxyType", conf.Type, "pushProxyName", conf.Name))
 			return
 		}
 	}
@@ -122,11 +122,10 @@ func (d *BasePushProxy) ChangeStatus(status byte) {
 			if d.PushOnStart {
 				d.Push()
 			} else {
-				d.Plugin.Server.Streams.Call(func() error {
+				d.Plugin.Server.CallOnStreamTask(func() {
 					if d.Plugin.Server.Streams.Has(d.GetStreamPath()) {
 						d.Push()
 					}
-					return nil
 				})
 			}
 		}
@@ -215,7 +214,7 @@ func (d *PushProxyConfig) InitializeWithServer(s *Server) {
 
 func (s *Server) GetPushProxyList(ctx context.Context, req *emptypb.Empty) (res *pb.PushProxyListResponse, err error) {
 	res = &pb.PushProxyListResponse{}
-	s.PushProxies.Call(func() error {
+	s.PushProxies.Call(func() {
 		for device := range s.PushProxies.Range {
 			conf := device.GetConfig()
 			res.Data = append(res.Data, &pb.PushProxyInfo{
@@ -234,7 +233,6 @@ func (s *Server) GetPushProxyList(ctx context.Context, req *emptypb.Empty) (res 
 				StreamPath:  device.GetStreamPath(),
 			})
 		}
-		return nil
 	})
 	return
 }
@@ -348,11 +346,10 @@ func (s *Server) UpdatePushProxy(ctx context.Context, req *pb.UpdatePushProxyReq
 	s.DB.Save(target)
 
 	// Stop the old proxy if needed
-	s.PushProxies.Call(func() error {
+	s.PushProxies.Call(func() {
 		if device, ok := s.PushProxies.Get(uint(req.ID)); ok {
 			device.Stop(task.ErrStopByUser)
 		}
-		return nil
 	})
 
 	// Create a new proxy with the updated config
@@ -373,11 +370,10 @@ func (s *Server) RemovePushProxy(ctx context.Context, req *pb.RequestWithId) (re
 			ID: uint(req.Id),
 		})
 		err = tx.Error
-		s.PushProxies.Call(func() error {
+		s.PushProxies.Call(func() {
 			if device, ok := s.PushProxies.Get(uint(req.Id)); ok {
 				device.Stop(task.ErrStopByUser)
 			}
-			return nil
 		})
 		return
 	} else if req.StreamPath != "" {
@@ -387,11 +383,10 @@ func (s *Server) RemovePushProxy(ctx context.Context, req *pb.RequestWithId) (re
 			for _, device := range deviceList {
 				tx := s.DB.Delete(device)
 				err = tx.Error
-				s.PushProxies.Call(func() error {
+				s.PushProxies.Call(func() {
 					if device, ok := s.PushProxies.Get(uint(device.ID)); ok {
 						device.Stop(task.ErrStopByUser)
 					}
-					return nil
 				})
 			}
 		}

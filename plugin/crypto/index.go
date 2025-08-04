@@ -5,7 +5,9 @@ import (
 	crypto "m7s.live/v5/plugin/crypto/pkg"
 )
 
-var _ = m7s.InstallPlugin[CryptoPlugin](crypto.NewTransform)
+var _ = m7s.InstallPlugin[CryptoPlugin](m7s.PluginMeta{
+	NewTransformer: crypto.NewTransform,
+})
 
 type CryptoPlugin struct {
 	m7s.Plugin
@@ -18,8 +20,8 @@ type CryptoPlugin struct {
 	} `desc:"密钥配置"`
 }
 
-// OnInit 初始化插件时的回调函数
-func (p *CryptoPlugin) OnInit() (err error) {
+// Start 初始化插件时的回调函数
+func (p *CryptoPlugin) Start() (err error) {
 	// 初始化全局配置
 	crypto.GlobalConfig = crypto.Config{
 		IsStatic:   p.IsStatic,

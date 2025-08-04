@@ -64,7 +64,7 @@ func (p *PushJob) Init(pusher IPusher, plugin *Plugin, streamPath string, conf c
 			sender(webhook, alarmInfo)
 		})
 	}
-	plugin.Server.Pushs.Add(p, plugin.Logger.With("pushURL", conf.URL, "streamPath", streamPath))
+	plugin.Server.Pushs.AddTask(p, plugin.Logger.With("pushURL", conf.URL, "streamPath", streamPath))
 	return p
 }
 
