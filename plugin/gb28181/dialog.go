@@ -346,20 +346,17 @@ func (d *Dialog) Run() (err error) {
 		pub.Receiver.IsSinglePort = false
 		if d.gb.udpPort > 0 {
 			d.Info("into single port mode, use gb.udpPort", d.gb.udpPort)
-
 			if d.gb.netUDPListener != nil {
 				d.Info("use gb.netUDPListener", d.gb.netUDPListener.LocalAddr())
-
 				pub.Receiver.ListenerUdp = d.gb.netUDPListener
 			} else {
 				d.Info("listen udp4", fmt.Sprintf(":%d", d.gb.udpPort))
-
-				addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", d.gb.udpPort))
+				pub.Receiver.ListenerUdp, err = util.ListenUDP(fmt.Sprintf(":%d", d.gb.udpPort), 1024*1024*4)
 				if err != nil {
-					d.Error("无法解析UDP地址: %v", err)
+					d.Error("listen udp4", fmt.Sprintf(":%d", d.gb.udpPort), "err", err)
 					return errors.New("start udp listen, err" + err.Error())
 				}
-				pub.Receiver.ListenerUdp, _ = net.ListenUDP("udp4", addr)
+
 				d.gb.netUDPListener = pub.Receiver.ListenerUdp
 			}
 			pub.Receiver.SSRC = d.SSRC

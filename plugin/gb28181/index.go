@@ -180,6 +180,7 @@ func (gb *GB28181Plugin) OnInit() (err error) {
 		if gb.MediaPort.Valid() {
 			gb.SetDescription("tcp", fmt.Sprintf("%d-%d", gb.MediaPort[0], gb.MediaPort[1]))
 			gb.tcpPorts = make(chan uint16, gb.MediaPort.Size())
+			gb.udpPorts = make(chan uint16, gb.MediaPort.Size())
 			if gb.MediaPort.Size() == 0 {
 				gb.tcpPort = gb.MediaPort[0]
 				gb.netListener, _ = net.Listen("tcp4", fmt.Sprintf(":%d", gb.tcpPort))
@@ -187,13 +188,8 @@ func (gb *GB28181Plugin) OnInit() (err error) {
 				//support udp
 				{
 					gb.udpPort = gb.MediaPort[0]
-					addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", gb.udpPort))
-					if err != nil {
-						gb.Error("无法解析UDP地址: %v", err)
-						return errors.New("start udp listen, err" + err.Error())
-					}
+					gb.netUDPListener, err = util.ListenUDP(fmt.Sprintf(":%d", gb.udpPort), 1024*1024*4)
 
-					gb.netUDPListener, err = net.ListenUDP("udp4", addr)
 					if err != nil {
 						gb.Error("start listen", "err", err)
 						return errors.New("start udp listen, err" + err.Error())
@@ -202,6 +198,17 @@ func (gb *GB28181Plugin) OnInit() (err error) {
 			} else if gb.MediaPort.Size() == 1 {
 				gb.tcpPort = gb.MediaPort[0] + 1
 				gb.netListener, _ = net.Listen("tcp4", fmt.Sprintf(":%d", gb.tcpPort))
+
+				//support udp
+				{
+					gb.udpPort = gb.MediaPort[0] + 1
+					gb.netUDPListener, err = util.ListenUDP(fmt.Sprintf(":%d", gb.udpPort), 1024*1024*4)
+
+					if err != nil {
+						gb.Error("start listen", "err", err)
+						return errors.New("start udp listen, err" + err.Error())
+					}
+				}
 			} else {
 				for i := range gb.MediaPort.Size() {
 					gb.tcpPorts <- gb.MediaPort[0] + i

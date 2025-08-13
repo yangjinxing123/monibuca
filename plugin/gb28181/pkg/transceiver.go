@@ -165,6 +165,8 @@ func (p *Receiver) ReadRTP(rtp util.Buffer) (err error) {
 		return nil
 	}
 
+	p.Info("-------------", "lastSeq", lastSeq, "seq", p.SequenceNumber)
+
 	if lastSeq == 0 || p.SequenceNumber == lastSeq+1 {
 		if p.TraceEnabled() {
 			p.Trace("rtp", "len", rtp.Len(), "seq", p.SequenceNumber, "payloadType", p.PayloadType, "ssrc", p.Packet.SSRC)
@@ -179,8 +181,11 @@ func (p *Receiver) ReadRTP(rtp util.Buffer) (err error) {
 			return task.ErrTaskComplete
 		}
 		return
+	} else {
+		p.Error("rtp seq mismatch,", "lastSeq", lastSeq, "seq", p.SequenceNumber)
+		return ErrRTPReceiveLost
 	}
-	return ErrRTPReceiveLost
+
 }
 
 func (p *Receiver) Start() (err error) {
@@ -203,13 +208,7 @@ func (p *Receiver) Start() (err error) {
 		if p.ListenerUdp == nil {
 			p.Info("start new listener", "addr", p.ListenAddr)
 
-			addr, err := net.ResolveUDPAddr("udp", p.ListenAddr)
-			if err != nil {
-				p.Error("无法解析UDP地址: %v", err)
-				return errors.New("start listen,err" + err.Error())
-			}
-
-			p.ListenerUdp, err = net.ListenUDP("udp4", addr)
+			p.ListenerUdp, err = util.ListenUDP(p.ListenAddr, 1024*1024*10)
 			if err != nil {
 				p.Error("start listen", "err", err)
 				return errors.New("start listen,err" + err.Error())

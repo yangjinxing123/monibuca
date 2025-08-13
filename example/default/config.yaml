@@ -1,56 +1,55 @@
 global:
+  http:
+   listenaddr: :8081
+   listenaddrtls: :8443
+   certfile: "D:\\m7s\\github\\monibuca\\example\\default\\rd.imagetech.vip.pem"
+   keyfile: "D:\\m7s\\github\\monibuca\\example\\default\\rd.imagetech.vip.key"
+   cors: true        
   location:
     "^/hdl/(.*)": "/flv/$1"
   loglevel: debug
   admin:
-    enablelogin: false
+    enablelogin: true
+    users:  
+      - username: "admin"
+        password: "cxyjxian"
+        role: "admin"
+      - username: "yjx"
+        password: "cxyjxian"
+        role: "admin"
+  #publish:
+   # delayclosetimeout: 10s
 srt:
   listenaddr: :6000
   passphrase: foobarfoobar
 gb28181:
-  enable: false  # 是否启用GB28181协议
-  autoinvite: false #建议使用false，开启后会自动邀请设备推流
-  mediaip: 192.168.1.21  #流媒体收流IP,外网情况下使用公网IP,内网情况下使用网卡IP,不要用127.0.0.1
-  sipip: 192.168.1.21  #SIP通讯IP,不管公网还是内网都使用本机网卡IP,不要用127.0.0.1
+  enable: true
+  autoinvite: false
+  mediaip: 192.168.110.28  #流媒体收流IP
+  sipip: 1192.168.110.28  #SIP通讯IP
+  mediaport: "64001-64010"  #流媒体收流端口
+  serial: "41010500002000000001"   #服务器serverid,可选
+  realm: "4101050000"    #服务器域,可选
+  password: "renzheShenGuI**!-"     #设备验证密码,可选
   sip:
     listenaddr:
-          - udp::5060
+          - udp::5062
+  # pull:
+  #   live/test: dump/34020000001320000001
   onsub:
     pull:
       ^\d{20}/\d{20}$: $0
       ^gb_\d+/(.+)$: $1
 #      .* : $0
-  platforms:
-    - enable: false  #是否启用平台
-      name: "测试平台" #平台名称
-      servergbid: "34020000002000000002" #上级平台GBID
-      servergbdomain: "3402000000" #上级平台GB域
-      serverip: 192.168.1.106 #上级平台IP
-      serverport: 5061 #上级平台端口
-      devicegbid: "34020000002000000001" #本平台设备GBID
-      deviceip: 192.168.1.106 #本平台设备IP
-      deviceport: 5060 #本平台设备端口
-      username: "34020000002000000001" #SIP账号
-      password: "123456" #SIP密码
-      expires: 3600 #注册有效期，单位秒
-      keeptimeout: 60 #注册保持超时时间，单位秒
-      civilCode: "340200" #行政区划代码
-      manufacturer: "Monibuca" #设备制造商
-      model: "GB28181" #设备型号
-      address: "江苏南京" #设备地址
-      register_way: 1
-      platformchannels:
-        - platformservergbid: "34020000002000000002" #上级平台GBID
-          channeldbid: "34020000001110000003_34020000001320000005" #通道DBID,格式为设备ID_通道ID
 mp4:
   # enable: false
   # publish:
   #   delayclosetimeout: 3s
-  # onpub:
-  #   record:
-  #     ^live/.+:
-  #         fragment: 10s
-  #         filepath: record/$0
+  onpub:
+    record:
+      ^\d{20}/\d{20}$:
+       fragment: 60s
+       filepath: record/$0
           # type: fmp4
   # pull:
   #   live/test: /Users/dexter/Movies/1744963190.mp4
@@ -78,14 +77,14 @@ flv:
 #   pull:
 #     live/test: https://livecb.alicdn.com/mediaplatform/afb241b3-408c-42dd-b665-04d22b64f9df.flv?auth_key=1734575216-0-0-c62721303ce751c8e5b2c95a2ec242a0&F=pc&source=34675810_null_live_detail&ali_flv_retain=2
 hls:
-  # onsub:
-  #   pull:
-  #     ^vod_hls_\d+/(.+)$: $1
+  #onsub:
+   # pull:
+   #    ^vod_hls_\d+/(.+)$: $1
   # pull:
   #   live/test: https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/gear3/prog_index.m3u8
-#   onpub:
-#     transform:
-#       .* : 5s x 3
+  #onpub:
+   #  transform:
+   #    .* : 5s x 3
 #rtsp:
 #  pull:
     # live/test: rtsp://admin:1qaz2wsx3EDC@giroro.tpddns.cn:1554/Streaming/Channels/101
