@@ -264,7 +264,7 @@ func (task *registerHandlerTask) RecoverDevice(d *Device, req *sip.Request) {
 			if sourceIPParse.IsPrivate() { // 源IP是内网IP
 				myWanIP = myLanIP // 使用内网IP作为外网IP
 			}
-		} else {                           // 目标地址是IP
+		} else { // 目标地址是IP
 			if sourceIPParse.IsPrivate() { // 源IP是内网IP
 				myLanIP, myWanIP = myIP, myIP // 使用目标IP作为内外网IP
 			}
@@ -372,7 +372,7 @@ func (task *registerHandlerTask) StoreDevice(deviceid string, req *sip.Request, 
 			if sourceIPParse.IsPrivate() { // 源IP是内网IP
 				myWanIP = myLanIP // 使用内网IP作为外网IP
 			}
-		} else {                           // 目标地址是IP
+		} else { // 目标地址是IP
 			if sourceIPParse.IsPrivate() { // 源IP是内网IP
 				myLanIP, myWanIP = myIP, myIP // 使用目标IP作为内外网IP
 			}
@@ -393,7 +393,7 @@ func (task *registerHandlerTask) StoreDevice(deviceid string, req *sip.Request, 
 	d.KeepaliveTime = now
 	d.Status = DeviceOnlineStatus
 	d.Online = true
-	d.StreamMode = "TCP-PASSIVE"  // 默认UDP传输
+	//d.StreamMode = "TCP-PASSIVE"  // 默认UDP传输
 	d.Charset = "GB2312"          // 默认GB2312字符集
 	d.GeoCoordSys = "WGS84"       // 默认WGS84坐标系
 	d.Transport = req.Transport() // 传输协议
@@ -460,6 +460,7 @@ func (task *registerHandlerTask) StoreDevice(deviceid string, req *sip.Request, 
 			task.gb.DB.Save(d).Omit("create_time")
 			task.gb.Info("StoreDevice", "type", "更新设备", "deviceId", d.DeviceId)
 		} else {
+			d.StreamMode = "UDP" //默认udp，想用tcp，调接口修改
 			task.gb.DB.Save(d)
 			task.gb.Info("StoreDevice", "type", "新增设备", "deviceId", d.DeviceId)
 		}

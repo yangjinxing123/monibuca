@@ -36,17 +36,20 @@ var ErrRTPReceiveLost = errors.New("rtp receive lost")
 type Receiver struct {
 	task.Task
 	rtp.Packet
-	FeedChan   chan []byte
-	psm        util.Memory
-	dump       *os.File
-	dumpLen    []byte
-	psVideo    PSVideo
-	psAudio    PSAudio
-	RTPReader  *rtp2.TCP
-	ListenAddr string
-	Listener   net.Listener
-	StreamMode string // 数据流传输模式（UDP:udp传输/TCP-ACTIVE：tcp主动模式/TCP-PASSIVE：tcp被动模式）
-	SSRC       uint32 // RTP SSRC
+	FeedChan     chan []byte
+	psm          util.Memory
+	dump         *os.File
+	dumpLen      []byte
+	psVideo      PSVideo
+	psAudio      PSAudio
+	RTPReader    *rtp2.TCP
+	ListenAddr   string
+	Listener     net.Listener
+	StreamMode   string // 数据流传输模式（UDP:udp传输/TCP-ACTIVE：tcp主动模式/TCP-PASSIVE：tcp被动模式）
+	SSRC         uint32 // RTP SSRC
+	ListenerUdp  *net.UDPConn
+	RTPReaderUdp *rtp2.UDP
+	IsSinglePort bool
 }
 
 func NewPSPublisher(puber *m7s.Publisher) *PSPublisher {
@@ -142,6 +145,10 @@ func (dec *PSPublisher) decProgramStreamMap() (err error) {
 	return nil
 }
 
+func (p *PSPublisher) GetKey() uint32 {
+	return p.Receiver.SSRC
+}
+
 func (p *Receiver) ReadRTP(rtp util.Buffer) (err error) {
 	lastSeq := p.SequenceNumber
 	if err = p.Unmarshal(rtp); err != nil {
@@ -181,17 +188,34 @@ func (p *Receiver) Start() (err error) {
 		// TCP主动模式不需要监听，直接返回
 		p.Info("TCP-ACTIVE mode, no need to listen")
 		return nil
-	}
-	// TCP被动模式
-	if p.Listener == nil {
-		p.Info("start new listener", "addr", p.ListenAddr)
-		p.Listener, err = net.Listen("tcp4", p.ListenAddr)
-		if err != nil {
-			p.Error("start listen", "err", err)
-			return errors.New("start listen,err" + err.Error())
+	} else if strings.ToUpper(p.StreamMode) == "TCP-PASSIVE" {
+		// TCP被动模式
+		if p.Listener == nil {
+			p.Info("start new listener", "addr", p.ListenAddr)
+			p.Listener, err = net.Listen("tcp4", p.ListenAddr)
+			if err != nil {
+				p.Error("start listen", "err", err)
+				return errors.New("start listen,err" + err.Error())
+			}
+		}
+		p.Info("start listen", "addr", p.ListenAddr)
+	} else {
+		if p.ListenerUdp == nil {
+			p.Info("start new listener", "addr", p.ListenAddr)
+
+			addr, err := net.ResolveUDPAddr("udp", p.ListenAddr)
+			if err != nil {
+				p.Error("无法解析UDP地址: %v", err)
+				return errors.New("start listen,err" + err.Error())
+			}
+
+			p.ListenerUdp, err = net.ListenUDP("udp4", addr)
+			if err != nil {
+				p.Error("start listen", "err", err)
+				return errors.New("start listen,err" + err.Error())
+			}
 		}
 	}
-	p.Info("start listen", "addr", p.ListenAddr)
 	return
 }
 
@@ -205,6 +229,10 @@ func (p *Receiver) Dispose() {
 	if p.RTPReader != nil {
 		p.RTPReader.Close()
 	}
+	if p.ListenerUdp != nil && !p.IsSinglePort {
+		p.ListenerUdp.Close()
+	}
+
 	if p.FeedChan != nil {
 		close(p.FeedChan)
 	}
@@ -230,15 +258,25 @@ func (p *Receiver) Go() error {
 		p.RTPReader = (*rtp2.TCP)(conn.(*net.TCPConn))
 		p.Info("connected to device", "addr", conn.RemoteAddr())
 		return p.RTPReader.Read(p.ReadRTP)
+	} else if strings.ToUpper(p.StreamMode) == "TCP-PASSIVE" { // TCP被动模式
+		p.Info("start accept")
+		conn, err := p.Listener.Accept()
+		if err != nil {
+			p.Error("accept", "err", err)
+			return err
+		}
+		p.RTPReader = (*rtp2.TCP)(conn.(*net.TCPConn))
+		p.Info("accept", "addr", conn.RemoteAddr())
+		return p.RTPReader.Read(p.ReadRTP)
+	} else { //UDP模式
+		if p.IsSinglePort {
+			p.Info("start SinglePort udp accept")
+			p.RTPReaderUdp = (*rtp2.UDP)(p.ListenerUdp)
+			return p.RTPReaderUdp.Read(p.ReadRTP)
+		} else {
+			p.Info("start udp accept")
+			p.RTPReaderUdp = (*rtp2.UDP)(p.ListenerUdp)
+			return p.RTPReaderUdp.Read(p.ReadRTP)
+		}
 	}
-	// TCP被动模式
-	p.Info("start accept")
-	conn, err := p.Listener.Accept()
-	if err != nil {
-		p.Error("accept", "err", err)
-		return err
-	}
-	p.RTPReader = (*rtp2.TCP)(conn.(*net.TCPConn))
-	p.Info("accept", "addr", conn.RemoteAddr())
-	return p.RTPReader.Read(p.ReadRTP)
 }
