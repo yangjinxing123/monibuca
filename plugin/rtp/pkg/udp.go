@@ -9,7 +9,8 @@ import (
 type UDP net.UDPConn
 
 func (t *UDP) Read(onRTP func(util.Buffer) error) (err error) {
-	buffer := make(util.Buffer, 1024*10)
+	buffer := make(util.Buffer, 1024*1024)
+
 	for {
 		n, _, err := (*net.UDPConn)(t).ReadFromUDP(buffer)
 		if err != nil {
@@ -18,22 +19,7 @@ func (t *UDP) Read(onRTP func(util.Buffer) error) (err error) {
 
 		err = onRTP(buffer[:n])
 		if err != nil {
-			return err
-		}
-	}
-}
-
-func (t *UDP) ReadUdpInsinglePort(onRTP func(util.Buffer) error) (err error) {
-	buffer := make(util.Buffer, 1024*10)
-	for {
-		n, _, err := (*net.UDPConn)(t).ReadFromUDP(buffer)
-		if err != nil {
-			return err
-		}
-
-		err = onRTP(buffer[:n])
-		if err != nil {
-			return err
+			//return err
 		}
 	}
 }

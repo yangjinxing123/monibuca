@@ -17,6 +17,7 @@ import (
 
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
+	"github.com/pion/rtp"
 	"github.com/rs/zerolog"
 	m7s "m7s.live/v5"
 	"m7s.live/v5/pkg/config"
@@ -194,6 +195,7 @@ func (gb *GB28181Plugin) OnInit() (err error) {
 						gb.Error("start listen", "err", err)
 						return errors.New("start udp listen, err" + err.Error())
 					}
+					go gb.ReadUdpInsinglePort()
 				}
 			} else if gb.MediaPort.Size() == 1 {
 				gb.tcpPort = gb.MediaPort[0] + 1
@@ -208,6 +210,8 @@ func (gb *GB28181Plugin) OnInit() (err error) {
 						gb.Error("start listen", "err", err)
 						return errors.New("start udp listen, err" + err.Error())
 					}
+
+					go gb.ReadUdpInsinglePort()
 				}
 			} else {
 				for i := range gb.MediaPort.Size() {
@@ -1067,5 +1071,25 @@ func (gb *GB28181Plugin) OnAck(req *sip.Request, tx sip.ServerTransaction) {
 	} else {
 		gb.Error("OnAck", "error", "forwardDialog not found", "callID", callID)
 		return
+	}
+}
+
+func (gb *GB28181Plugin) ReadUdpInsinglePort() (err error) {
+	buffer := make(util.Buffer, 1024*1024)
+	var rtpPacket rtp.Packet
+	for {
+		n, _, err := gb.netUDPListener.ReadFromUDP(buffer)
+		if err != nil {
+			return err
+		}
+
+		ps := buffer[:n]
+		if err := rtpPacket.Unmarshal(ps); err != nil {
+			continue
+		}
+		pub, ret := gb.udpPubs.Get(rtpPacket.SSRC)
+		if ret {
+			pub.Receiver.ReadUdpRTP(buffer[:n])
+		}
 	}
 }

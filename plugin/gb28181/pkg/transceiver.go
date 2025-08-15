@@ -50,6 +50,7 @@ type Receiver struct {
 	ListenerUdp  *net.UDPConn
 	RTPReaderUdp *rtp2.UDP
 	IsSinglePort bool
+	SingleStop   chan struct{}
 }
 
 func NewPSPublisher(puber *m7s.Publisher) *PSPublisher {
@@ -165,6 +166,43 @@ func (p *Receiver) ReadRTP(rtp util.Buffer) (err error) {
 		return nil
 	}
 
+	if lastSeq == 0 || p.SequenceNumber == lastSeq+1 {
+		if p.TraceEnabled() {
+			p.Trace("rtp", "len", rtp.Len(), "seq", p.SequenceNumber, "payloadType", p.PayloadType, "ssrc", p.Packet.SSRC)
+		}
+		copyData := make([]byte, len(p.Payload))
+		copy(copyData, p.Payload)
+		select {
+		case p.FeedChan <- copyData:
+			// 成功发送数据
+		case <-p.Done():
+			// 任务已停止，返回错误
+			return task.ErrTaskComplete
+		}
+		return
+	} else {
+		p.Error("rtp seq mismatch,", "lastSeq", lastSeq, "seq", p.SequenceNumber)
+		return ErrRTPReceiveLost
+	}
+
+}
+
+func (p *Receiver) ReadUdpRTP(rtp util.Buffer) (err error) {
+	lastSeq := p.SequenceNumber
+	if err = p.Unmarshal(rtp); err != nil {
+		p.Error("unmarshal error", "err", err)
+		return
+	}
+
+	// 如果设置了SSRC过滤，只处理匹配的SSRC
+	if p.SSRC != 0 && p.SSRC != p.Packet.SSRC {
+		p.Info("into single port mode, ssrc mismatch", "expected", p.SSRC, "actual", p.Packet.SSRC)
+		if p.TraceEnabled() {
+			p.Trace("rtp ssrc mismatch, skip", "expected", p.SSRC, "actual", p.Packet.SSRC)
+		}
+		return nil
+	}
+
 	p.Info("-------------", "lastSeq", lastSeq, "seq", p.SequenceNumber)
 
 	if lastSeq == 0 || p.SequenceNumber == lastSeq+1 {
@@ -231,6 +269,9 @@ func (p *Receiver) Dispose() {
 	if p.ListenerUdp != nil && !p.IsSinglePort {
 		p.ListenerUdp.Close()
 	}
+	if p.IsSinglePort {
+		close(p.SingleStop)
+	}
 
 	if p.FeedChan != nil {
 		close(p.FeedChan)
@@ -269,13 +310,15 @@ func (p *Receiver) Go() error {
 		return p.RTPReader.Read(p.ReadRTP)
 	} else { //UDP模式
 		if p.IsSinglePort {
-			p.Info("start SinglePort udp accept")
-			p.RTPReaderUdp = (*rtp2.UDP)(p.ListenerUdp)
-			return p.RTPReaderUdp.Read(p.ReadRTP)
+			p.SingleStop = make(chan struct{})
+			<-p.SingleStop
+			p.Info("stop udp accept", "ssrc", p.SSRC)
+			return nil
+
 		} else {
 			p.Info("start udp accept")
 			p.RTPReaderUdp = (*rtp2.UDP)(p.ListenerUdp)
-			return p.RTPReaderUdp.Read(p.ReadRTP)
+			return p.RTPReaderUdp.Read(p.ReadUdpRTP)
 		}
 	}
 }
