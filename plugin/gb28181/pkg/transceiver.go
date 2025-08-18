@@ -12,6 +12,7 @@ import (
 	"m7s.live/v5/pkg"
 	"m7s.live/v5/pkg/task"
 	"m7s.live/v5/pkg/util"
+	"m7s.live/v5/plugin/gb28181/udputils"
 	rtp2 "m7s.live/v5/plugin/rtp/pkg"
 )
 
@@ -51,6 +52,9 @@ type Receiver struct {
 	RTPReaderUdp *rtp2.UDP
 	IsSinglePort bool
 	SingleStop   chan struct{}
+	udpCache     *udputils.PriorityQueueRtp
+	UdpCacheSize int
+	lastSeq      uint16
 }
 
 func NewPSPublisher(puber *m7s.Publisher) *PSPublisher {
@@ -188,13 +192,12 @@ func (p *Receiver) ReadRTP(rtp util.Buffer) (err error) {
 }
 
 func (p *Receiver) ReadUdpRTP(rtp util.Buffer) (err error) {
-	lastSeq := p.SequenceNumber
+	//解析rtp
 	if err = p.Unmarshal(rtp); err != nil {
 		p.Error("unmarshal error", "err", err)
 		return
 	}
-
-	// 如果设置了SSRC过滤，只处理匹配的SSRC
+	//判断ssrc
 	if p.SSRC != 0 && p.SSRC != p.Packet.SSRC {
 		p.Info("into single port mode, ssrc mismatch", "expected", p.SSRC, "actual", p.Packet.SSRC)
 		if p.TraceEnabled() {
@@ -203,27 +206,51 @@ func (p *Receiver) ReadUdpRTP(rtp util.Buffer) (err error) {
 		return nil
 	}
 
-	p.Info("-------------", "lastSeq", lastSeq, "seq", p.SequenceNumber)
-
-	if lastSeq == 0 || p.SequenceNumber == lastSeq+1 {
-		if p.TraceEnabled() {
-			p.Trace("rtp", "len", rtp.Len(), "seq", p.SequenceNumber, "payloadType", p.PayloadType, "ssrc", p.Packet.SSRC)
-		}
-		copyData := make([]byte, len(p.Payload))
-		copy(copyData, p.Payload)
-		select {
-		case p.FeedChan <- copyData:
-			// 成功发送数据
-		case <-p.Done():
-			// 任务已停止，返回错误
-			return task.ErrTaskComplete
-		}
-		return
-	} else {
-		p.Error("rtp seq mismatch,", "lastSeq", lastSeq, "seq", p.SequenceNumber)
-		return ErrRTPReceiveLost
+	if p.UdpCacheSize > 0 && p.udpCache == nil {
+		p.udpCache = udputils.NewPqRtp()
 	}
 
+	rtpTmp := p.Packet //缓存的第一个包
+
+	if p.UdpCacheSize > 0 {
+		//序号小于第一个包的丢弃,rtp包序号达到65535后会从0开始，所以这里需要判断一下
+		if p.Packet.SequenceNumber < p.lastSeq && p.lastSeq-p.Packet.SequenceNumber < udputils.MaxRtpDiff {
+			return
+		}
+		p.udpCache.Push(p.Packet)
+		rtpTmp, _ = p.udpCache.Pop()
+	}
+
+	if p.lastSeq != 0 {
+		//seq不连续
+		if p.lastSeq+1 != rtpTmp.SequenceNumber {
+			if p.UdpCacheSize > 0 { //缓存有空余，将pop出来的放入缓存，返回
+				if p.udpCache.Len() < p.UdpCacheSize {
+					p.udpCache.Push(rtpTmp)
+					return
+				} else { //缓存已满，清空缓存
+					p.udpCache.Empty()
+					rtpTmp = p.Packet
+				}
+			}
+		}
+	}
+
+	p.lastSeq = rtpTmp.SequenceNumber
+
+	if p.TraceEnabled() {
+		p.Trace("rtp", "len", rtp.Len(), "seq", p.SequenceNumber, "payloadType", p.PayloadType, "ssrc", p.Packet.SSRC)
+	}
+	copyData := make([]byte, len(rtpTmp.Payload))
+	copy(copyData, rtpTmp.Payload)
+	select {
+	case p.FeedChan <- copyData:
+		// 成功发送数据
+	case <-p.Done():
+		// 任务已停止，返回错误
+		return task.ErrTaskComplete
+	}
+	return
 }
 
 func (p *Receiver) Start() (err error) {

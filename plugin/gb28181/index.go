@@ -1087,6 +1087,7 @@ func (gb *GB28181Plugin) ReadUdpInsinglePort() (err error) {
 		if err := rtpPacket.Unmarshal(ps); err != nil {
 			continue
 		}
+
 		pub, ret := gb.udpPubs.Get(rtpPacket.SSRC)
 		if ret {
 			pub.Receiver.ReadUdpRTP(buffer[:n])

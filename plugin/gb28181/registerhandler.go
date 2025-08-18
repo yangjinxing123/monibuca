@@ -460,7 +460,7 @@ func (task *registerHandlerTask) StoreDevice(deviceid string, req *sip.Request, 
 			task.gb.DB.Save(d).Omit("create_time")
 			task.gb.Info("StoreDevice", "type", "更新设备", "deviceId", d.DeviceId)
 		} else {
-			d.StreamMode = "UDP" //默认udp，想用tcp，调接口修改
+			d.StreamMode = "TCP-PASSIVE" //默认tcp，想用udp，调接口修改
 			task.gb.DB.Save(d)
 			task.gb.Info("StoreDevice", "type", "新增设备", "deviceId", d.DeviceId)
 		}

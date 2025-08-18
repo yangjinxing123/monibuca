@@ -364,6 +364,7 @@ func (d *Dialog) Run() (err error) {
 
 		}
 		pub.Receiver.ListenAddr = fmt.Sprintf(":%d", d.MediaPort)
+		pub.Receiver.UdpCacheSize = 30
 	}
 
 	pub.Receiver.StreamMode = d.StreamMode
