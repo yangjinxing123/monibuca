@@ -195,11 +195,11 @@ func (p *Receiver) ReadUdpRTP(rtp util.Buffer) (err error) {
 	//解析rtp
 	if err = p.Unmarshal(rtp); err != nil {
 		p.Error("unmarshal error", "err", err)
-		return
+		return nil
 	}
 	//判断ssrc
 	if p.SSRC != 0 && p.SSRC != p.Packet.SSRC {
-		p.Info("into single port mode, ssrc mismatch", "expected", p.SSRC, "actual", p.Packet.SSRC)
+		p.Info("ReadUdpRTP, ssrc mismatch", "expected", p.SSRC, "actual", p.Packet.SSRC)
 		if p.TraceEnabled() {
 			p.Trace("rtp ssrc mismatch, skip", "expected", p.SSRC, "actual", p.Packet.SSRC)
 		}
@@ -215,21 +215,27 @@ func (p *Receiver) ReadUdpRTP(rtp util.Buffer) (err error) {
 	if p.UdpCacheSize > 0 {
 		//序号小于第一个包的丢弃,rtp包序号达到65535后会从0开始，所以这里需要判断一下
 		if p.Packet.SequenceNumber < p.lastSeq && p.lastSeq-p.Packet.SequenceNumber < udputils.MaxRtpDiff {
-			return
+			return nil
 		}
 		p.udpCache.Push(p.Packet)
 		rtpTmp, _ = p.udpCache.Pop()
 	}
 
+	havelost := false
 	if p.lastSeq != 0 {
 		//seq不连续
 		if p.lastSeq+1 != rtpTmp.SequenceNumber {
+			havelost = true
 			if p.UdpCacheSize > 0 { //缓存有空余，将pop出来的放入缓存，返回
 				if p.udpCache.Len() < p.UdpCacheSize {
 					p.udpCache.Push(rtpTmp)
-					return
+					p.Warn("seq not continuous, push to cache", "ssrc", p.Packet.SSRC, "lastseq",
+						p.lastSeq, "currentseq", p.Packet.SequenceNumber, "cacheheadseq", rtpTmp.SequenceNumber)
+					return nil
 				} else { //缓存已满，清空缓存
 					p.udpCache.Empty()
+					p.Warn("seq not continuous, cache is full, clear cache", "ssrc", p.Packet.SSRC, "lastseq",
+						p.lastSeq, "currentseq", p.Packet.SequenceNumber, "cacheheadseq", rtpTmp.SequenceNumber)
 					rtpTmp = p.Packet
 				}
 			}
@@ -237,6 +243,10 @@ func (p *Receiver) ReadUdpRTP(rtp util.Buffer) (err error) {
 	}
 
 	p.lastSeq = rtpTmp.SequenceNumber
+	if havelost {
+		p.Warn("seq not continuous, lost", "ssrc", p.Packet.SSRC, "lastseq",
+			p.lastSeq, "currentseq", p.Packet.SequenceNumber, "cacheheadseq", rtpTmp.SequenceNumber)
+	}
 
 	if p.TraceEnabled() {
 		p.Trace("rtp", "len", rtp.Len(), "seq", p.SequenceNumber, "payloadType", p.PayloadType, "ssrc", p.Packet.SSRC)
@@ -250,7 +260,7 @@ func (p *Receiver) ReadUdpRTP(rtp util.Buffer) (err error) {
 		// 任务已停止，返回错误
 		return task.ErrTaskComplete
 	}
-	return
+	return nil
 }
 
 func (p *Receiver) Start() (err error) {

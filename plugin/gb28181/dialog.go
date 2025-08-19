@@ -359,12 +359,13 @@ func (d *Dialog) Run() (err error) {
 
 				d.gb.netUDPListener = pub.Receiver.ListenerUdp
 			}
-			pub.Receiver.SSRC = d.SSRC
+
 			pub.Receiver.IsSinglePort = true
 
 		}
+		pub.Receiver.SSRC = d.SSRC
 		pub.Receiver.ListenAddr = fmt.Sprintf(":%d", d.MediaPort)
-		pub.Receiver.UdpCacheSize = 30
+		pub.Receiver.UdpCacheSize = 10
 	}
 
 	pub.Receiver.StreamMode = d.StreamMode
